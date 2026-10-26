@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
 import { fetchPage } from './safe-fetch.js';
 import { baseDomain, extractEmails, firstMailto, rankEmails, type EmailSource, type FoundEmail } from './emails.js';
+import { extractLinkedIn, type LinkedInKind, type LinkedInLink } from './linkedin.js';
 
 export interface Contacts {
   website: string | null;
@@ -11,8 +12,13 @@ export interface Contacts {
   emailSource: EmailSource | null;
   emails: string[];          // запасные адреса
   emailPersonal: boolean;    // бесплатный ящик — вероятно, частное лицо
+  linkedinUrl: string | null;          // со страниц самого разработчика
+  linkedinKind: LinkedInKind | null;   // компания или личный профиль
   errors: string[];          // что не удалось проверить (для лога)
 }
+
+/** Версия сбора контактов: при росте лиды со старой версией перепроверяются (v2 — LinkedIn). */
+export const CONTACTS_VERSION = 2;
 
 export interface EnrichInput {
   trackId: string;
@@ -146,16 +152,31 @@ export async function enrichContacts(app: EnrichInput): Promise<Contacts> {
     const best = rankEmails(found, domains).best;
     return !!best && (best.source === 'google_play' || domains.some((d) => baseDomain(d) === baseDomain(best.email.split('@')[1])));
   };
-  for (const [url, source] of pages) {
-    if (good()) break;
+  // LinkedIn берём только со страниц на домене сайта разработчика: поддержка и политика часто
+  // лежат на чужих платформах (Zendesk, Termly…), и в их подвале — LinkedIn самой платформы.
+  const devDomain = website ? baseDomain(website) : null;
+  const linkedin: LinkedInLink[] = [];
+  const fetched = new Set<string>();
+  const visit = async (url: string, source: EmailSource) => {
+    fetched.add(url);
     try {
       const page = await fetchPage(url);
       for (const email of extractEmails(page.html)) found.push({ email, source });
+      if (devDomain && baseDomain(page.url) === devDomain) linkedin.push(...extractLinkedIn(page.html));
     } catch (e) {
       errors.push(`${source}: ${(e as Error).message}`);
     }
+  };
+  for (const [url, source] of pages) {
+    if (good()) break;
+    await visit(url, source);
+  }
+  // LinkedIn обычно в шапке или подвале главной: если почта нашлась раньше, заглянем и туда
+  if (linkedin.length === 0 && website && pages.some(([u]) => u === website) && !fetched.has(website)) {
+    await visit(website, 'website');
   }
 
+  const li = linkedin.find((l) => l.kind === 'company') ?? linkedin[0] ?? null;
   const ranked = rankEmails(found, domains);
   return {
     website,
@@ -166,6 +187,8 @@ export async function enrichContacts(app: EnrichInput): Promise<Contacts> {
     emailSource: ranked.best?.source ?? null,
     emails: ranked.others,
     emailPersonal: ranked.personal,
+    linkedinUrl: li?.url ?? null,
+    linkedinKind: li?.kind ?? null,
     errors,
   };
 }

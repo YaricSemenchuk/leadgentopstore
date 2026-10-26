@@ -57,12 +57,13 @@ function assertLlmWorked(total: number, ok: number, failed: number, firstError: 
 }
 
 /** Контакты для подходящих лидов, которые ещё не проверяли (или давно). */
-export async function runContacts(report: Report = silent): Promise<{ checked: number; found: number }> {
+export async function runContacts(report: Report = silent): Promise<{ checked: number; found: number; linkedin: number }> {
   const targets = await leadsNeedingContacts(config.contacts.recheckDays);
-  if (targets.length === 0) return { checked: 0, found: 0 };
+  if (targets.length === 0) return { checked: 0, found: 0, linkedin: 0 };
   console.log(`  контакты: проверяю ${targets.length} лидов`);
   const gate = pLimit(config.contacts.concurrency);
   let found = 0;
+  let linkedin = 0;
   let done = 0;
   report(`контакты 0/${targets.length}`);
   await Promise.all(
@@ -72,16 +73,17 @@ export async function runContacts(report: Report = silent): Promise<{ checked: n
           const contacts = await enrichContacts(t);
           await saveContacts(t.trackId, contacts);
           if (contacts.email) found++;
+          if (contacts.linkedinUrl) linkedin++;
           if (contacts.errors.length) console.warn(`  ⚠ контакты ${t.name}: ${contacts.errors.join('; ')}`);
         } catch (e) {
           console.warn(`  ⚠ контакты ${t.name}: ${(e as Error).message}`);
         }
-        report(`контакты ${++done}/${targets.length}, почта у ${found}`);
+        report(`контакты ${++done}/${targets.length}, почта у ${found}, LinkedIn у ${linkedin}`);
       }),
     ),
   );
-  console.log(`  контакты: почта найдена у ${found} из ${targets.length}`);
-  return { checked: targets.length, found };
+  console.log(`  контакты: почта найдена у ${found} из ${targets.length}, LinkedIn у ${linkedin}`);
+  return { checked: targets.length, found, linkedin };
 }
 
 /**

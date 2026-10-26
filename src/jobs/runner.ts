@@ -1,6 +1,6 @@
 import { pool } from '../db/pool.js';
 import { getParseSettings } from '../settings.js';
-import { llmKeyMissing, runPipeline } from './run-pipeline.js';
+import { llmKeyMissing, runContacts, runPipeline } from './run-pipeline.js';
 
 /**
  * Запуск прохода из дашборда или по API: не больше одного одновременно (сервис на Railway
@@ -9,8 +9,12 @@ import { llmKeyMissing, runPipeline } from './run-pipeline.js';
 
 export type RunTrigger = 'ui' | 'api';
 
+/** full — сбор, оценка и контакты; contacts — только дособрать контакты и LinkedIn (без модели). */
+export type RunKind = 'full' | 'contacts';
+
 export interface CurrentRun {
   id: number;
+  kind: RunKind;
   trigger: RunTrigger;
   startedAt: Date;
   stage: string;
@@ -30,20 +34,30 @@ export async function markInterruptedRuns(): Promise<void> {
   );
 }
 
-export async function startRun(trigger: RunTrigger): Promise<{ started: true; id: number } | { started: false; reason: string }> {
+export async function startRun(
+  trigger: RunTrigger,
+  kind: RunKind = 'full',
+): Promise<{ started: true; id: number } | { started: false; reason: string }> {
   if (current) return { started: false, reason: `проход #${current.id} уже идёт (${current.stage})` };
-  const missingKey = llmKeyMissing();
-  if (missingKey) return { started: false, reason: `${missingKey} не задан на сервере` };
+  if (kind === 'full') {
+    const missingKey = llmKeyMissing();
+    if (missingKey) return { started: false, reason: `${missingKey} не задан на сервере` };
+  }
 
   const settings = await getParseSettings();
   const { rows } = await pool.query(
     `INSERT INTO runs (trigger, status, params) VALUES ($1, 'running', $2) RETURNING id`,
-    [trigger, JSON.stringify(settings)],
+    [trigger, JSON.stringify({ kind, ...settings })],
   );
-  const run: CurrentRun = { id: rows[0].id, trigger, startedAt: new Date(), stage: 'старт' };
+  const run: CurrentRun = { id: rows[0].id, kind, trigger, startedAt: new Date(), stage: 'старт' };
   current = run;
 
-  runPipeline({ settings, report: (stage) => (run.stage = stage) })
+  const report = (stage: string) => (run.stage = stage);
+  const work =
+    kind === 'contacts'
+      ? runContacts(report).then((r) => ({ contactsChecked: r.checked, contactsFound: r.found, linkedinFound: r.linkedin }))
+      : runPipeline({ settings, report });
+  work
     .then((result) =>
       pool.query(`UPDATE runs SET status = 'done', result = $2, finished_at = now() WHERE id = $1`, [run.id, JSON.stringify(result)]),
     )
@@ -64,9 +78,12 @@ export interface RunRow {
   status: string;
   started_at: Date;
   finished_at: Date | null;
-  result: { scanned?: number; saved?: number; contactsFound?: number; llmErrors?: number; failedCharts?: string[] } | null;
+  result: {
+    scanned?: number; saved?: number; contactsChecked?: number; contactsFound?: number; linkedinFound?: number;
+    llmErrors?: number; failedCharts?: string[];
+  } | null;
   error: string | null;
-  params: { countries?: string[]; genres?: string[]; charts?: string[] } | null;
+  params: { kind?: RunKind; countries?: string[]; genres?: string[]; charts?: string[] } | null;
 }
 
 export async function recentRuns(limit = 8): Promise<RunRow[]> {

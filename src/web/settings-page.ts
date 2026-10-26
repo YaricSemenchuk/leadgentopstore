@@ -32,6 +32,9 @@ function duration(r: RunRow): string {
 function runSummary(r: RunRow): string {
   if (r.error) return `<span class="bad">${esc(r.error)}</span>`;
   if (!r.result) return '';
+  if (r.params?.kind === 'contacts') {
+    return `проверено ${fmt(r.result.contactsChecked)}, почта у ${fmt(r.result.contactsFound)}, LinkedIn у ${fmt(r.result.linkedinFound)}`;
+  }
   const failed = r.result.failedCharts?.length ?? 0;
   const llmErrors = r.result.llmErrors ?? 0;
   return `просканировано ${fmt(r.result.scanned)}, оценено ${fmt(r.result.saved)}, почта +${fmt(r.result.contactsFound)}${failed ? ` · <span class="warn">чартов не пришло: ${failed}</span>` : ''}${llmErrors ? ` · <span class="warn">ошибок оценки: ${llmErrors}</span>` : ''}`;
@@ -40,6 +43,7 @@ function runSummary(r: RunRow): string {
 function scope(r: RunRow): string {
   const p = r.params;
   if (!p) return '';
+  if (p.kind === 'contacts') return 'контакты и LinkedIn';
   return `${p.countries?.length ?? 0} стран × ${p.genres?.length ?? 0} кат. × ${p.charts?.length ?? 0} чарт.`;
 }
 
@@ -94,7 +98,12 @@ export function renderSettingsPage(o: { settings: ParseSettings; run: CurrentRun
   <p class="sub">Выборка для сбора лидов из топ-чартов App Store. Сохраняется на сервере и применяется к следующему прогону.</p>
   ${o.flash ? `<div class="flash ${o.flash.kind}">${esc(o.flash.text)}</div>` : ''}
 
-  <div class="card"><h2>Статус</h2>${status}${runsTable}</div>
+  <div class="card"><h2>Статус</h2>${status}
+    <form method="post" action="/runs/contacts" class="bar">
+      <button type="submit"${running ? ' disabled title="Сбор уже идёт"' : ''}>Дособрать контакты и LinkedIn</button>
+      <span class="mut small">Без модели: почта и LinkedIn для уже найденных лидов, у которых их ещё не искали. Работает и при исчерпанном лимите Anthropic.</span>
+    </form>
+    ${runsTable}</div>
 
   <form method="post" action="/settings" id="f">
     <div class="card">

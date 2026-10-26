@@ -77,3 +77,8 @@ CREATE TABLE IF NOT EXISTS runs (
   started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at TIMESTAMPTZ
 );
+
+-- v5: LinkedIn со страниц разработчика; версия сбора контактов (выросла — перепроверить)
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_url     TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_kind    TEXT;   -- company | person
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS contacts_version INT;

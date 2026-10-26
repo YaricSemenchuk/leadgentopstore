@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { config } from '../config.js';
 import type { Candidate } from '../pipeline/aggregate.js';
 import type { Lead } from '../llm/qualify.js';
-import type { Contacts } from '../contacts/enrich.js';
+import { CONTACTS_VERSION, type Contacts } from '../contacts/enrich.js';
 import type { Tier } from '../pipeline/tier.js';
 
 export const pool = new pg.Pool({ connectionString: config.databaseUrl });
@@ -155,16 +155,20 @@ export interface ContactTarget {
   country: string;
 }
 
-/** Лиды, которым нужны контакты: подходят (needs_ua) и не проверялись recheckDays дней. */
+/**
+ * Лиды, которым нужны контакты: подходят (needs_ua) и не проверялись recheckDays дней
+ * или проверялись старой версией сбора (например, ещё без LinkedIn).
+ */
 export async function leadsNeedingContacts(recheckDays: number): Promise<ContactTarget[]> {
   const { rows } = await pool.query(
     `SELECT track_id, name, bundle_id, seller_url,
             CASE WHEN 'us' = ANY(countries) THEN 'us' ELSE countries[1] END AS country
      FROM leads
      WHERE needs_ua = true
-       AND (contacts_checked_at IS NULL OR contacts_checked_at < now() - make_interval(days => $1))
+       AND (contacts_checked_at IS NULL OR contacts_checked_at < now() - make_interval(days => $1)
+            OR COALESCE(contacts_version, 1) < $2)
      ORDER BY fit_score DESC NULLS LAST`,
-    [recheckDays],
+    [recheckDays, CONTACTS_VERSION],
   );
   return rows.map((r) => ({
     trackId: r.track_id,
@@ -179,9 +183,13 @@ export async function saveContacts(trackId: string, c: Contacts): Promise<void> 
   await pool.query(
     `UPDATE leads SET
        website=$2, support_url=$3, privacy_url=$4, play_url=$5,
-       email=$6, email_source=$7, emails=$8, email_personal=$9, contacts_checked_at=now()
+       email=$6, email_source=$7, emails=$8, email_personal=$9,
+       linkedin_url=$10, linkedin_kind=$11, contacts_version=$12, contacts_checked_at=now()
      WHERE track_id=$1`,
-    [trackId, c.website, c.supportUrl, c.privacyUrl, c.playUrl, c.email, c.emailSource, c.emails, c.emailPersonal],
+    [
+      trackId, c.website, c.supportUrl, c.privacyUrl, c.playUrl, c.email, c.emailSource, c.emails, c.emailPersonal,
+      c.linkedinUrl, c.linkedinKind, CONTACTS_VERSION,
+    ],
   );
 }
 
@@ -204,7 +212,7 @@ export async function topLeads(limit = 100, { view = 'active', withEmail = false
             country_count, countries, best_rank, in_grossing, rating_count,
             publisher_apps, publisher_ratings,
             ${TIER_SQL} AS tier, tier_reason, fit_score, pitch_hook, reasons,
-            email, email_source, emails, email_personal,
+            email, email_source, emails, email_personal, linkedin_url, linkedin_kind,
             COALESCE(website, seller_url) AS website, support_url, privacy_url, play_url,
             contacts_checked_at, qualified_at, last_seen
      FROM leads

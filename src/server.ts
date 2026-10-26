@@ -6,6 +6,7 @@ import { currentRun, markInterruptedRuns, recentRuns, startRun } from './jobs/ru
 import { getParseSettings, ParseSettingsSchema, saveParseSettings } from './settings.js';
 import { renderSettingsPage, type Flash } from './web/settings-page.js';
 import { esc, fmt, page, safeHref } from './web/ui.js';
+import { linkedinSearchLinks } from './contacts/linkedin.js';
 
 const app = express();
 
@@ -95,6 +96,10 @@ const CSV_COLUMNS: Array<[string, (r: any) => unknown]> = [
   ['email_source', (r) => r.email_source],
   ['email_personal', (r) => (r.email_personal ? 'yes' : '')],
   ['other_emails', (r) => (r.emails ?? []).join(' ')],
+  ['linkedin', (r) => r.linkedin_url],
+  ['linkedin_kind', (r) => r.linkedin_kind],
+  ['linkedin_company_search', (r) => linkedinSearchLinks(r.developer).company],
+  ['linkedin_people_search', (r) => linkedinSearchLinks(r.developer).people],
   ['website', (r) => r.website],
   ['support_url', (r) => r.support_url],
   ['google_play', (r) => r.play_url],
@@ -146,9 +151,16 @@ app.get('/', wrap(async (req, res) => {
         ? `<a class="mail" href="mailto:${esc(r.email)}">${esc(r.email)}</a>
            <div class="src">${esc(SOURCE_LABEL[r.email_source] ?? r.email_source)}${r.email_personal ? ' · <span class="warn">личный ящик</span>' : ''}</div>`
         : `<span class="mut">${r.contacts_checked_at ? 'почта не найдена' : 'ещё не проверяли'}</span>`;
-      const links = [link(r.website, 'сайт'), link(r.support_url, 'поддержка'), link(r.play_url, 'Google Play')]
+      const links = [
+        r.linkedin_url ? `<b>${link(r.linkedin_url, r.linkedin_kind === 'person' ? 'LinkedIn (профиль)' : 'LinkedIn')}</b>` : '',
+        link(r.website, 'сайт'),
+        link(r.support_url, 'поддержка'),
+        link(r.play_url, 'Google Play'),
+      ]
         .filter(Boolean)
         .join(' · ');
+      const li = linkedinSearchLinks(r.developer);
+      const liSearch = `<div class="small mut">найти в LinkedIn: ${link(li.company, 'компания')} · ${link(li.people, 'люди')} · ${link(li.google, 'Google')}</div>`;
       const publisher =
         r.publisher_apps !== null && r.publisher_apps !== undefined
           ? `издатель: ${fmt(r.publisher_apps)} прил. · ${fmt(r.publisher_ratings)} отзывов`
@@ -163,7 +175,7 @@ app.get('/', wrap(async (req, res) => {
         <td>${esc(r.vertical ?? r.primary_genre)}</td>
         <td>${esc(r.best_placement)}<div class="mut small">в топах ${esc(r.country_count)} стран</div></td>
         <td class="num">${fmt(r.rating_count)}</td>
-        <td class="contact">${contact}${links ? `<div class="small">${links}</div>` : ''}</td>
+        <td class="contact">${contact}${links ? `<div class="small">${links}</div>` : ''}${liSearch}</td>
         <td>${esc(r.pitch_hook)}</td>
       </tr>`;
     })
@@ -254,6 +266,16 @@ app.post('/settings', wrap(async (req, res) => {
   }
   const runs = await recentRuns();
   res.status(409).type('html').send(renderSettingsPage({ settings: parsed.data, run: currentRun(), runs, flash: { kind: 'bad', text: `Сохранено, но сбор не запущен: ${r.reason}` } }));
+}));
+
+app.post('/runs/contacts', wrap(async (_req, res) => {
+  const r = await startRun('ui', 'contacts');
+  if (r.started) {
+    res.redirect(303, `/settings?started=${r.id}`);
+    return;
+  }
+  const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
+  res.status(409).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash: { kind: 'bad', text: `Не запущено: ${r.reason}` } }));
 }));
 
 app.get('/api/run-status', wrap(async (_req, res) => {
