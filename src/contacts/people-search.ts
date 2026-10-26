@@ -42,7 +42,7 @@ const SerperResponse = z.object({
 const SERPER_URL = 'https://google.serper.dev/search';
 
 /** Версия правил отбора: при росте лиды, где поиск что-то нашёл, перепроверяются. */
-export const LINKEDIN_SEARCH_VERSION = 2;
+export const LINKEDIN_SEARCH_VERSION = 3;
 
 /** Один запрос к Serper. 401/403 — ключ неверный или кредиты кончились: дальше искать бессмысленно. */
 export async function serperSearch(q: string, apiKey = config.search.apiKey): Promise<SearchHit[]> {
@@ -188,7 +188,7 @@ export function currentEmployer(snippet: string): string | null {
 const FORMER = /\b(former|ex-|ex\s|previously|past|бывш)/i;
 
 // Частный разработчик: однофамильцев много, берём только профиль про разработку приложений.
-const DEV_PROFILE = /\b(developer|dev|indie|game|games|gamedev|app|apps|ios|android|mobile|software|engineer|programmer|unity|swift|flutter|studio)\b|разработчик|개발자|开发/i;
+const DEV_PROFILE = /\b(developer|indie|gamedev|game developer|app developer|ios|android|apps?|unity|swift|flutter|programmer|software engineer|mobile engineer)\b|разработчик|개발자|开发/i;
 
 const NOT_DECISION = /\b(recruit\w*|talent|human resources?|hr|intern|internship|student|trainee|assistant|customer support|support specialist|tester)\b/i;
 const ROLE_RANKS: Array<[RegExp, number]> = [

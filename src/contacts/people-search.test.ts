@@ -148,6 +148,7 @@ test('частный разработчик: однофамильцы не из 
     { title: 'Thu Nguyen - Non-profit executive leading through culture', link: 'https://www.linkedin.com/in/thu-1', snippet: '' },
     { title: 'Thu Nguyen - Senior Research Associate at Duke', link: 'https://www.linkedin.com/in/thu-2', snippet: '' },
     { title: 'Thu Nguyen - Indie iOS Developer', link: 'https://vn.linkedin.com/in/thu-3', snippet: '' },
+    { title: 'Thu Nguyen - Systems Engineer at Marvel Studios', link: 'https://www.linkedin.com/in/thu-4', snippet: '' },
   ];
   assert.deepEqual(pickPeople(hits, q).map((p) => p.url), ['https://www.linkedin.com/in/thu-3/']);
 });
