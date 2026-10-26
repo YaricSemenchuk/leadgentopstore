@@ -5,3 +5,5 @@ dist
 # локальные настройки IDE и превью
 .idea/
 .claude/
+.env.*
+!.env.example
