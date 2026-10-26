@@ -1,0 +1,7 @@
+node_modules
+dist
+.env
+*.log
+# локальные настройки IDE и превью
+.idea/
+.claude/
