@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { isFreeMailDomain } from './emails.js';
+import { baseDomain, isFreeMailDomain } from './emails.js';
 
 /**
  * LinkedIn для лида. Сам LinkedIn не парсим (логин, антибот, ToS, персональные данные):
@@ -145,8 +145,32 @@ export function brandFrom(h: BrandHints): string | null {
   return null;
 }
 
+/** Регистрируемые домены разработчика: сайт, почта (не бесплатная), поддержка, политика. */
+export function knownDomains(h: BrandHints): string[] {
+  const out = new Set<string>();
+  const add = (u: string | null | undefined) => {
+    if (!u) return;
+    try {
+      const host = new URL(u).hostname;
+      const label = host.replace(/^www\./, '').split('.')[0];
+      if (!GENERIC_HOSTS.has(label)) out.add(baseDomain(host));
+    } catch {
+      /* битый URL */
+    }
+  };
+  add(h.website);
+  const emailDomain = h.email?.split('@')[1];
+  if (emailDomain && !isFreeMailDomain(emailDomain)) add(`https://${emailDomain}`);
+  add(h.supportUrl);
+  add(h.privacyUrl);
+  return [...out];
+}
+
 export interface LinkedInQueries {
   person: boolean;         // разработчик — частное лицо
+  brand: string | null;    // бренд из домена — главный признак «та самая компания»
+  name: string;            // юрлицо без юридического хвоста — часто совпадает у разных фирм
+  domains: string[];       // известные домены разработчика (сайт, почта, поддержка) для сверки с карточкой
   terms: string[];         // бренд и/или название — по ним проверяем, что результат про нужную компанию
   companyKeywords: string; // для поиска компаний внутри LinkedIn
   companyQuery: string;    // Google: site:linkedin.com/company …
@@ -162,9 +186,13 @@ export function linkedinQueries(developer: string, hints: BrandHints | string | 
   // оба варианта, если бренд отличается от юрлица
   const terms = [...new Set([brand, name].filter((v): v is string => !!v).map((v) => v.trim()))];
   const either = terms.length > 1 ? `(${terms.map(quoted).join(' OR ')})` : quoted(terms[0]);
+  const domains = knownDomains(typeof hints === 'string' || hints === null ? { website: hints } : hints);
   if (person) {
     return {
       person,
+      brand,
+      name,
+      domains,
       terms,
       companyKeywords: brand ?? name,
       companyQuery: `site:linkedin.com ${either}`,
@@ -173,6 +201,9 @@ export function linkedinQueries(developer: string, hints: BrandHints | string | 
   }
   return {
     person,
+    brand,
+    name,
+    domains,
     terms,
     companyKeywords: quoted(brand ?? name),
     companyQuery: `site:linkedin.com/company ${either}`,
