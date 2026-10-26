@@ -59,3 +59,21 @@ CREATE TABLE IF NOT EXISTS chart_cache (
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS tier        TEXT;
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS tier_reason TEXT;
 CREATE INDEX IF NOT EXISTS idx_leads_tier ON leads (tier, fit_score DESC);
+
+-- v4: что парсить (страница «Что парсить») и история прогонов
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+  id          SERIAL PRIMARY KEY,
+  trigger     TEXT NOT NULL,                 -- ui | api | cli
+  status      TEXT NOT NULL,                 -- running | done | failed | interrupted
+  params      JSONB,
+  result      JSONB,
+  error       TEXT,
+  started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at TIMESTAMPTZ
+);

@@ -50,6 +50,15 @@ export interface Lead extends Pick<ModelLead, 'vertical' | 'reasons' | 'pitchHoo
 
 export class RefusalError extends Error {}
 
+/** Текст ошибки API без JSON-обёртки: «You have reached your specified API usage limits…». */
+export function llmErrorText(e: unknown): string {
+  if (e instanceof Anthropic.APIError) {
+    const body = e.error as { error?: { message?: string } } | undefined;
+    return `${e.status ?? ''} ${body?.error?.message ?? e.message}`.trim();
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
 const SYSTEM = `Ты — аналитик лидогенерации для promobile Ads: сервиса мотивированного трафика (incentivized installs), продвижения по ключевым словам и рейтингов в App Store и Google Play. Клиент promobile — независимая небольшая или средняя студия/компания, чей доход зависит от установок и позиций в сторе: мобильные игры, утилиты, потребительские стартапы.
 
 По данным о приложении из топ-чартов:

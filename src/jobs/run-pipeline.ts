@@ -5,32 +5,35 @@ import { fetchAllCharts } from '../apple/charts.js';
 import { pgChartCache } from '../apple/chart-cache.js';
 import { lookupPublishers, lookupWithFallback } from '../apple/lookup.js';
 import { buildCandidates, heuristicSignals, priorityScore, type Candidate } from '../pipeline/aggregate.js';
-import { qualifyCandidate } from '../llm/qualify.js';
+import { llmErrorText, qualifyCandidate } from '../llm/qualify.js';
 import { enrichContacts } from '../contacts/enrich.js';
 import {
   hideExcludedPublishers, initSchema, leadsForRescore, leadsNeedingContacts, pool, recentlyQualified,
   refreshSignals, saveContacts, saveQualification, upsertLead,
 } from '../db/pool.js';
+import { getParseSettings, type ParseSettings } from '../settings.js';
 
-const { targeting } = config;
+/** Отчёт о ходе прохода: этап и счётчик — дашборд показывает его, пока проход идёт. */
+export type Report = (stage: string) => void;
+const silent: Report = () => {};
+
+function isExcludedPublisher(developer: string, excluded: string[]): boolean {
+  const d = developer.toLowerCase();
+  return excluded.some((p) => d.includes(p));
+}
 
 /**
- * Дешёвый отбор ДО LLM: не гигант по отзывам и есть хоть один признак, что нужен буст.
- * «Недавно обновлялось» само по себе не повод: обновляется почти весь топ.
+ * Дешёвый отбор ДО LLM: не гигант по отзывам, не из списка исключений и есть хоть один
+ * признак, что нужен буст. «Недавно обновлялось» само по себе не повод: обновляется почти весь топ.
  */
-function isExcludedPublisher(developer: string): boolean {
-  const d = developer.toLowerCase();
-  return targeting.excludePublishers.some((p) => d.includes(p));
+function isTarget(c: Candidate, s: ParseSettings): boolean {
+  if ((c.ratingCount ?? 0) > s.maxAppRatings) return false;
+  if (isExcludedPublisher(c.developer, s.excludePublishers)) return false;
+  const h = heuristicSignals(c);
+  return h.isNew || h.wideGeo || h.isGameOrUtility || h.weakAsoHint || h.lowRatingVolume;
 }
 
-function isTarget(c: Candidate): boolean {
-  if ((c.ratingCount ?? 0) > targeting.maxAppRatings) return false;
-  if (isExcludedPublisher(c.developer)) return false;
-  const s = heuristicSignals(c);
-  return s.isNew || s.wideGeo || s.isGameOrUtility || s.weakAsoHint || s.lowRatingVolume;
-}
-
-function llmKeyMissing(): string | null {
+export function llmKeyMissing(): string | null {
   const { provider } = config.llm;
   const key = provider === 'groq' ? config.llm.groq.apiKey : config.llm.anthropic.apiKey;
   if (key && !key.endsWith('...')) return null;
@@ -44,16 +47,24 @@ export interface PipelineResult {
   saved: number;
   contactsChecked: number;
   contactsFound: number;
+  llmErrors: number;
   failedCharts: string[];
 }
 
+/** Все оценки упали — это не «оценено 0», а сломанный ключ, лимит или недоступный API. */
+function assertLlmWorked(total: number, ok: number, failed: number, firstError: string): void {
+  if (total > 0 && ok === 0 && failed > 0) throw new Error(`оценка моделью не прошла: ${firstError}`);
+}
+
 /** Контакты для подходящих лидов, которые ещё не проверяли (или давно). */
-export async function runContacts(): Promise<{ checked: number; found: number }> {
+export async function runContacts(report: Report = silent): Promise<{ checked: number; found: number }> {
   const targets = await leadsNeedingContacts(config.contacts.recheckDays);
   if (targets.length === 0) return { checked: 0, found: 0 };
   console.log(`  контакты: проверяю ${targets.length} лидов`);
   const gate = pLimit(config.contacts.concurrency);
   let found = 0;
+  let done = 0;
+  report(`контакты 0/${targets.length}`);
   await Promise.all(
     targets.map((t) =>
       gate(async () => {
@@ -65,6 +76,7 @@ export async function runContacts(): Promise<{ checked: number; found: number }>
         } catch (e) {
           console.warn(`  ⚠ контакты ${t.name}: ${(e as Error).message}`);
         }
+        report(`контакты ${++done}/${targets.length}, почта у ${found}`);
       }),
     ),
   );
@@ -79,15 +91,18 @@ export async function runContacts(): Promise<{ checked: number; found: number }>
 export async function runRescore({ all = false } = {}): Promise<{ rescored: number; byTier: Record<string, number> }> {
   const missingKey = llmKeyMissing();
   if (missingKey) throw new Error(`${missingKey} не задан в .env — квалификация невозможна`);
+  const settings = await getParseSettings();
 
-  const hidden = await hideExcludedPublishers(targeting.excludePublishers);
+  const hidden = await hideExcludedPublishers(settings.excludePublishers);
   if (hidden) console.log(`  скрыто лидов по списку исключений: ${hidden}`);
 
-  const leads = (await leadsForRescore(!all)).filter((c) => !isExcludedPublisher(c.developer));
+  const leads = (await leadsForRescore(!all)).filter((c) => !isExcludedPublisher(c.developer, settings.excludePublishers));
   console.log(`▶ переоценка: ${leads.length} лидов${all ? ' (все)' : ' (без уровня)'}`);
   const gate = pLimit(4);
   const byTier: Record<string, number> = {};
   let rescored = 0;
+  let failedLlm = 0;
+  let firstLlmError = '';
   await Promise.all(
     leads.map((c) =>
       gate(async () => {
@@ -97,34 +112,46 @@ export async function runRescore({ all = false } = {}): Promise<{ rescored: numb
           byTier[lead.tier] = (byTier[lead.tier] ?? 0) + 1;
           rescored++;
         } catch (e) {
-          console.warn(`  ⚠ ${c.name}: ${(e as Error).message}`);
+          failedLlm++;
+          firstLlmError ||= llmErrorText(e);
+          console.warn(`  ⚠ ${c.name}: ${llmErrorText(e)}`);
         }
       }),
     ),
   );
   console.log(`  переоценено: ${rescored} / ${leads.length} — ${JSON.stringify(byTier)}`);
+  assertLlmWorked(leads.length, rescored, failedLlm, firstLlmError);
 
   // новым целевым и «под вопросом» нужны контакты
   await runContacts();
   return { rescored, byTier };
 }
 
-/** dryRun: сбор + отбор без LLM, без контактов и без записи в БД — проверить фиды и объём работы. */
-export async function runPipeline({ dryRun = false } = {}): Promise<PipelineResult> {
+export interface RunOptions {
+  dryRun?: boolean;
+  /** что парсить; по умолчанию — сохранённое на странице «Что парсить» (или .env) */
+  settings?: ParseSettings;
+  report?: Report;
+}
+
+/** dryRun: сбор + отбор без LLM, без контактов и без записи лидов — проверить фиды и объём работы. */
+export async function runPipeline({ dryRun = false, settings, report = silent }: RunOptions = {}): Promise<PipelineResult> {
   const missingKey = dryRun ? null : llmKeyMissing();
-  if (missingKey) throw new Error(`${missingKey} не задан в .env — квалификация невозможна`);
+  if (missingKey) throw new Error(`${missingKey} не задан — квалификация невозможна`);
+  const s = settings ?? (await getParseSettings());
 
   const t0 = Date.now();
   console.log(
-    `▶ countries=${config.countries.length} genres=${config.genres.length} charts=${config.charts.join(',')} limit=${config.chartLimit}${dryRun ? ' (dry run)' : ''}`,
+    `▶ countries=${s.countries.length} genres=${s.genres.length} charts=${s.charts.join(',')} limit=${s.chartLimit}${dryRun ? ' (dry run)' : ''}`,
   );
 
   // 1. Сбор чартов (с кэшем: iTunes RSS блокирует IP после сотен запросов подряд)
-  const charts = await fetchAllCharts(config.countries, config.genres, config.charts, {
-    limit: config.chartLimit,
+  const charts = await fetchAllCharts(s.countries, s.genres, s.charts, {
+    limit: s.chartLimit,
     concurrency: config.concurrency,
     cache: pgChartCache(),
     cacheTtlHours: config.chartCacheHours,
+    onProgress: (done, total) => report(`чарты ${done}/${total}`),
   });
   const { appearances, total, failed } = charts;
   console.log(
@@ -136,6 +163,7 @@ export async function runPipeline({ dryRun = false } = {}): Promise<PipelineResu
   if (appearances.length === 0) throw new Error('Фиды Apple не вернули ни одного чарта, кэша нет');
 
   // 2. Метаданные: US-стор, затем локальные сторы для того, чего в US нет
+  report('метаданные приложений');
   const firstCountry = new Map<string, string>();
   for (const a of appearances) if (!firstCountry.has(a.entry.id)) firstCountry.set(a.entry.id, a.country);
   const meta = await lookupWithFallback(firstCountry);
@@ -143,31 +171,32 @@ export async function runPipeline({ dryRun = false } = {}): Promise<PipelineResu
 
   // 3. Агрегация и отбор по приложению
   const candidates = buildCandidates(appearances, meta);
-  const targets = candidates.filter(isTarget).sort((a, b) => priorityScore(b) - priorityScore(a));
-  console.log(`  целевых (≤${targeting.maxAppRatings} отзывов и есть сигнал): ${targets.length} / ${candidates.length}`);
+  const targets = candidates.filter((c) => isTarget(c, s)).sort((a, b) => priorityScore(b) - priorityScore(a));
+  console.log(`  целевых (≤${s.maxAppRatings} отзывов и есть сигнал): ${targets.length} / ${candidates.length}`);
 
   // 4. Недавно оценённых не гоняем через модель повторно — только обновляем сигналы
   let pending = targets;
   if (!dryRun) {
     // список исключений мог поменяться — убираем таких издателей и из уже сохранённых лидов
-    const hidden = await hideExcludedPublishers(targeting.excludePublishers);
+    const hidden = await hideExcludedPublishers(s.excludePublishers);
     if (hidden) console.log(`  скрыто лидов по списку исключений: ${hidden}`);
-    const fresh = await recentlyQualified(targets.map((c) => c.trackId), targeting.requalifyDays);
+    const fresh = await recentlyQualified(targets.map((c) => c.trackId), config.targeting.requalifyDays);
     for (const c of targets) if (fresh.has(c.trackId)) await refreshSignals(c);
     pending = targets.filter((c) => !fresh.has(c.trackId));
-    if (fresh.size) console.log(`  уже оценены за ${targeting.requalifyDays} дн.: ${fresh.size}`);
+    if (fresh.size) console.log(`  уже оценены за ${config.targeting.requalifyDays} дн.: ${fresh.size}`);
   }
 
   // 5. Размер издателя — только для верха очереди (iTunes Lookup лимитирован)
-  const shortlist = pending.slice(0, Math.ceil(targeting.maxLlmPerRun * 1.5));
+  report('размер издателей');
+  const shortlist = pending.slice(0, Math.ceil(s.maxLlmPerRun * 1.5));
   const publishers = await lookupPublishers(
     shortlist.map((c) => c.artistId).filter((id): id is number => !!id),
   );
   for (const c of shortlist) if (c.artistId) c.publisher = publishers.get(c.artistId);
-  const small = shortlist.filter((c) => (c.publisher?.totalRatings ?? 0) <= targeting.maxPublisherRatings);
-  const toQualify = small.slice(0, targeting.maxLlmPerRun);
+  const small = shortlist.filter((c) => (c.publisher?.totalRatings ?? 0) <= s.maxPublisherRatings);
+  const toQualify = small.slice(0, s.maxLlmPerRun);
   console.log(
-    `  без крупных издателей (≤${targeting.maxPublisherRatings} отзывов на портфель): ${small.length} / ${shortlist.length}, в LLM: ${toQualify.length}`,
+    `  без крупных издателей (≤${s.maxPublisherRatings} отзывов на портфель): ${small.length} / ${shortlist.length}, в LLM: ${toQualify.length}`,
   );
 
   if (dryRun) {
@@ -181,13 +210,17 @@ export async function runPipeline({ dryRun = false } = {}): Promise<PipelineResu
     console.log(`\n✅ dry run за ${((Date.now() - t0) / 1000).toFixed(1)}s — в LLM ушло бы ${toQualify.length} запросов`);
     return {
       scanned: candidates.length, targets: targets.length, qualified: toQualify.length, saved: 0,
-      contactsChecked: 0, contactsFound: 0, failedCharts: failed,
+      contactsChecked: 0, contactsFound: 0, llmErrors: 0, failedCharts: failed,
     };
   }
 
   // 6. Квалификация через LLM (с лимитом параллелизма и мягкой обработкой ошибок)
   const gate = pLimit(4);
   let saved = 0;
+  let done = 0;
+  let failedLlm = 0;
+  let firstLlmError = '';
+  report(`оценка 0/${toQualify.length}`);
   await Promise.all(
     toQualify.map((c) =>
       gate(async () => {
@@ -196,21 +229,25 @@ export async function runPipeline({ dryRun = false } = {}): Promise<PipelineResu
           await upsertLead(c, lead);
           saved++;
         } catch (e) {
-          console.warn(`  ⚠ ${c.name}: ${(e as Error).message}`);
+          failedLlm++;
+          firstLlmError ||= llmErrorText(e);
+          console.warn(`  ⚠ ${c.name}: ${llmErrorText(e)}`);
         }
+        report(`оценка ${++done}/${toQualify.length}`);
       }),
     ),
   );
   console.log(`  оценено моделью: ${saved} / ${toQualify.length}`);
+  assertLlmWorked(toQualify.length, saved, failedLlm, firstLlmError);
 
   // 7. Контакты для подходящих лидов
-  const contacts = await runContacts();
+  const contacts = await runContacts(report);
 
   const dt = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`✅ готово за ${dt}s — просканировано ${candidates.length}, оценено ${saved}, с почтой +${contacts.found}`);
   return {
     scanned: candidates.length, targets: targets.length, qualified: toQualify.length, saved,
-    contactsChecked: contacts.checked, contactsFound: contacts.found, failedCharts: failed,
+    contactsChecked: contacts.checked, contactsFound: contacts.found, llmErrors: failedLlm, failedCharts: failed,
   };
 }
 

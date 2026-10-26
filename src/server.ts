@@ -2,7 +2,10 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { timingSafeEqual } from 'node:crypto';
 import { config } from './config.js';
 import { initSchema, leadStats, topLeads, pool, type LeadFilter, type LeadView } from './db/pool.js';
-import { runPipeline } from './jobs/run-pipeline.js';
+import { currentRun, markInterruptedRuns, recentRuns, startRun } from './jobs/runner.js';
+import { getParseSettings, ParseSettingsSchema, saveParseSettings } from './settings.js';
+import { renderSettingsPage, type Flash } from './web/settings-page.js';
+import { esc, fmt, page, safeHref } from './web/ui.js';
 
 const app = express();
 
@@ -23,24 +26,17 @@ const wrap =
 // Health — без авторизации, для проверок Railway
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// Запуск прохода: по токену; отвечаем сразу, проход идёт в фоне (с контактами он дольше HTTP-таймаута)
-let running: Promise<unknown> | null = null;
-app.post('/ingest', (req, res) => {
+// Запуск прохода по API (cron): по токену; отвечаем сразу, проход идёт в фоне с выборкой со страницы «Что парсить»
+app.post('/ingest', wrap(async (req, res) => {
   const auth = req.get('authorization') ?? '';
   if (!INGEST_TOKEN || !safeEqual(auth, `Bearer ${INGEST_TOKEN}`)) {
     res.status(401).json({ ok: false, error: 'нужен заголовок Authorization: Bearer <INGEST_TOKEN>' });
     return;
   }
-  if (running) {
-    res.status(409).json({ ok: false, error: 'проход уже идёт' });
-    return;
-  }
-  running = runPipeline()
-    .then((r) => console.log('ingest done', r))
-    .catch((e) => console.error('ingest failed', (e as Error).message))
-    .finally(() => (running = null));
-  res.status(202).json({ ok: true, started: true });
-});
+  const r = await startRun('api');
+  if (r.started) res.status(202).json({ ok: true, runId: r.id });
+  else res.status(409).json({ ok: false, error: r.reason });
+}));
 
 // Всё остальное (лиды с контактами) — под паролем, если он задан
 app.use((req, res, next) => {
@@ -49,6 +45,22 @@ app.use((req, res, next) => {
   const password = scheme === 'Basic' && value ? Buffer.from(value, 'base64').toString().split(':').slice(1).join(':') : '';
   if (safeEqual(password, DASHBOARD_PASSWORD)) return next();
   res.set('WWW-Authenticate', 'Basic realm="leads"').status(401).send('auth required');
+});
+
+// Формы дашборда. Запросы с чужих сайтов отбрасываем: браузер подставил бы сохранённый пароль (CSRF).
+app.use(express.urlencoded({ extended: false, limit: '100kb' }));
+app.use((req, res, next) => {
+  if (req.method !== 'POST') return next();
+  const from = req.get('origin') ?? req.get('referer') ?? '';
+  const host = req.get('x-forwarded-host') ?? req.get('host');
+  let sameOrigin = false;
+  try {
+    sameOrigin = !!from && new URL(from).host === host;
+  } catch {
+    /* битый Origin */
+  }
+  if (sameOrigin) return next();
+  res.status(403).send('запрос не со страницы дашборда');
 });
 
 /** Фильтр из query: view=target|maybe|skip (по умолчанию целевые + под вопросом), with=email. */
@@ -118,14 +130,6 @@ const SOURCE_LABEL: Record<string, string> = {
   website: 'сайт',
 };
 
-const esc = (s: unknown) =>
-  String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-
-/** Только http(s) в href — ссылки пишут сторонние разработчики. */
-const safeHref = (u: unknown) => (typeof u === 'string' && /^https?:\/\//i.test(u) ? esc(u) : '');
-
-const fmt = (n: unknown) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('ru-RU'));
-
 // HTML-дашборд
 app.get('/', wrap(async (req, res) => {
   const filter = filterFrom(req);
@@ -170,32 +174,13 @@ app.get('/', wrap(async (req, res) => {
   const viewTab = (view: LeadView, label: string) =>
     tab(filter.view === view, query({ ...filter, view }), label);
 
-  res.type('html').send(`<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>App Store Leads</title>
-<style>
-  :root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e8eaed;--mut:#9aa3b2;--acc:#5b8cff;--warn:#e0a84a}
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;padding:24px}
-  h1{font-size:18px;margin:0 0 4px} .sub{color:var(--mut);margin:0 0 14px}
-  .bar{display:flex;gap:8px;align-items:center;margin:0 0 14px;flex-wrap:wrap}
-  .tab{padding:6px 12px;border:1px solid var(--line);border-radius:8px;color:var(--fg);text-decoration:none}
-  .tab.on{border-color:var(--acc);color:var(--acc)} .csv{margin-left:auto}
-  .wrap{overflow-x:auto;border-radius:10px}
-  table{width:100%;border-collapse:collapse;background:var(--card);min-width:960px}
-  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
-  th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
-  tr:last-child td{border-bottom:none}
-  .fit{font-weight:700;color:var(--acc);font-size:16px} .num{text-align:right;font-variant-numeric:tabular-nums}
-  .dev{color:var(--mut);font-size:12px} .mut{color:var(--mut)} .small{font-size:12px;margin-top:2px}
-  .src{font-size:12px;color:var(--mut)} .warn{color:var(--warn)}
-  .mail{font-weight:600;overflow-wrap:anywhere} td.contact{min-width:240px} td.fit-cell{min-width:110px}
-  .tier{display:inline-block;margin-top:4px;padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid var(--line)}
-  .t-target{color:#4cc38a;border-color:#2b6b4d} .t-maybe{color:var(--warn);border-color:#6b5428} .t-skip{color:var(--mut)}
-  .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
-  a{color:var(--acc)}
-</style></head><body>
-  <h1>App Store Leads</h1>
+  res.type('html').send(
+    page({
+      title: 'Лиды',
+      active: 'leads',
+      run: currentRun(),
+      body: `
+  <h1>Лиды</h1>
   <p class="sub">Целевых: ${stats.target} (с почтой ${stats.target_with_email}) · под вопросом: ${stats.maybe} · мимо: ${stats.skip} (скрыты)${stats.unscored ? ` · без уровня: ${stats.unscored}` : ''}${stats.unchecked ? ` · контакты не проверены: ${stats.unchecked}` : ''}</p>
   <div class="bar">
     ${viewTab('active', 'Целевые и под вопросом')}
@@ -206,11 +191,73 @@ app.get('/', wrap(async (req, res) => {
     ${tab(filter.withEmail, query({ ...filter, withEmail: !filter.withEmail }), 'Только с почтой')}
     <a class="tab csv" href="/api/leads.csv${query(filter)}">Скачать CSV</a>
   </div>
-  <div class="wrap"><table>
+  <div class="wrap"><table class="leads">
     <thead><tr><th>Уровень</th><th>Приложение</th><th>Вертикаль</th><th>Где в топе</th><th>Отзывы</th><th>Контакт</th><th>Зацепка</th></tr></thead>
-    <tbody>${tr || '<tr><td colspan="7" style="text-align:center;color:var(--mut);padding:40px">Пусто — запусти проход: npm run ingest</td></tr>'}</tbody>
-  </table></div>
-</body></html>`);
+    <tbody>${tr || '<tr><td colspan="7" style="text-align:center;color:var(--mut);padding:40px">Пусто — выбери, <a href="/settings">что парсить</a>, и запусти сбор</td></tr>'}</tbody>
+  </table></div>`,
+      css: `
+  table.leads{min-width:960px}
+  .fit{font-weight:700;color:var(--acc);font-size:16px} .num{text-align:right;font-variant-numeric:tabular-nums}
+  .dev{color:var(--mut);font-size:12px} .src{font-size:12px;color:var(--mut)}
+  .mail{font-weight:600;overflow-wrap:anywhere} td.contact{min-width:240px} td.fit-cell{min-width:110px}
+  .tier{display:inline-block;margin-top:4px;padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid var(--line)}
+  .t-target{color:#4cc38a;border-color:#2b6b4d} .t-maybe{color:var(--warn);border-color:#6b5428} .t-skip{color:var(--mut)}`,
+    }),
+  );
+}));
+
+// --- Что парсить ---
+
+const FLASH: Record<string, Flash> = {
+  saved: { kind: 'ok', text: 'Сохранено. Новая выборка применится к следующему сбору.' },
+};
+
+function list(v: unknown): string[] {
+  if (v === undefined) return [];
+  return (Array.isArray(v) ? v : [v]).map(String);
+}
+
+app.get('/settings', wrap(async (req, res) => {
+  const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
+  let flash = FLASH[String(req.query.ok ?? '')];
+  if (req.query.started) flash = { kind: 'ok', text: `Сбор #${Number(req.query.started)} запущен — статус обновляется на этой странице.` };
+  res.type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash }));
+}));
+
+app.post('/settings', wrap(async (req, res) => {
+  const b = req.body ?? {};
+  const parsed = ParseSettingsSchema.safeParse({
+    countries: list(b.countries),
+    genres: list(b.genres),
+    charts: list(b.charts),
+    chartLimit: Number(b.chartLimit),
+    maxLlmPerRun: Number(b.maxLlmPerRun),
+    maxAppRatings: Number(b.maxAppRatings),
+    maxPublisherRatings: Number(b.maxPublisherRatings),
+    excludePublishers: String(b.excludePublishers ?? '').split(/\r?\n/),
+  });
+  if (!parsed.success) {
+    const text = parsed.error.issues.map((i) => i.message).join('; ');
+    const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
+    res.status(400).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash: { kind: 'bad', text: `Не сохранено: ${text}` } }));
+    return;
+  }
+  await saveParseSettings(parsed.data);
+  if (b.action !== 'run') {
+    res.redirect(303, '/settings?ok=saved');
+    return;
+  }
+  const r = await startRun('ui');
+  if (r.started) {
+    res.redirect(303, `/settings?started=${r.id}`);
+    return;
+  }
+  const runs = await recentRuns();
+  res.status(409).type('html').send(renderSettingsPage({ settings: parsed.data, run: currentRun(), runs, flash: { kind: 'bad', text: `Сохранено, но сбор не запущен: ${r.reason}` } }));
+}));
+
+app.get('/api/run-status', wrap(async (_req, res) => {
+  res.json({ current: currentRun(), runs: await recentRuns(5) });
 }));
 
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
@@ -223,6 +270,7 @@ if (!DASHBOARD_PASSWORD && process.env.NODE_ENV === 'production') {
 }
 
 await initSchema();
+await markInterruptedRuns();
 const server = app.listen(config.port, () => console.log(`🚀 http://localhost:${config.port}`));
 
 // Деплой/перезапуск: сначала перестаём принимать запросы, потом закрываем БД и выходим.

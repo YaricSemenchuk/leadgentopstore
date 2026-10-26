@@ -144,6 +144,7 @@ export interface FetchChartsOptions {
   staleMaxHours?: number;  // при отказе фида берём копию не старше
   minIntervalMs?: number;  // темп запросов к RSS
   breakerAfter?: number;   // столько 403 подряд — дальше в фид не ходим
+  onProgress?: (done: number, total: number) => void;
 }
 
 /** Не чаще одного запроса в minIntervalMs на весь процесс. */
@@ -175,6 +176,7 @@ export async function fetchAllCharts(
     staleMaxHours = 24 * 7,
     minIntervalMs = 700,
     breakerAfter = 6,
+    onProgress,
   }: FetchChartsOptions,
 ): Promise<ChartsResult> {
   const gate = pLimit(concurrency);
@@ -237,6 +239,13 @@ export async function fetchAllCharts(
   }
 
   result.total = jobs.length;
-  result.appearances = (await Promise.all(jobs)).flat();
+  let done = 0;
+  const tracked = jobs.map((job) =>
+    job.then((r) => {
+      onProgress?.(++done, jobs.length);
+      return r;
+    }),
+  );
+  result.appearances = (await Promise.all(tracked)).flat();
   return result;
 }
