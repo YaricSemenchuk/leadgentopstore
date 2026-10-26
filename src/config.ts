@@ -127,6 +127,11 @@ export const config = {
     concurrency: num(process.env.CONTACTS_CONCURRENCY, 3),
     recheckDays: num(process.env.CONTACTS_RECHECK_DAYS, 30),
   },
+  // Автопоиск LinkedIn через поисковый API (Serper.dev — выдача Google); без ключа выключен
+  search: {
+    apiKey: (process.env.SERPER_API_KEY ?? '').trim(),
+    maxPerRun: num(process.env.LINKEDIN_SEARCH_MAX_PER_RUN, 300),
+  },
 
   llm: {
     provider: (process.env.LLM_PROVIDER ?? 'anthropic') as 'anthropic' | 'groq',

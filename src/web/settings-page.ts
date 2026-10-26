@@ -29,15 +29,22 @@ function duration(r: RunRow): string {
   return min < 1 ? '<1 мин' : `${min} мин`;
 }
 
+function linkedinSummary(r: RunRow): string {
+  const li = r.result?.linkedin;
+  if (!li || li.skipped) return '';
+  if (li.error) return ` · <span class="warn">LinkedIn: ${esc(li.error)}</span>`;
+  return li.searched ? ` · LinkedIn: компаний ${fmt(li.companies)}, людей ${fmt(li.people)}` : '';
+}
+
 function runSummary(r: RunRow): string {
   if (r.error) return `<span class="bad">${esc(r.error)}</span>`;
   if (!r.result) return '';
   if (r.params?.kind === 'contacts') {
-    return `проверено ${fmt(r.result.contactsChecked)}, почта у ${fmt(r.result.contactsFound)}, LinkedIn у ${fmt(r.result.linkedinFound)}`;
+    return `проверено ${fmt(r.result.contactsChecked)}, почта у ${fmt(r.result.contactsFound)}, LinkedIn на сайте у ${fmt(r.result.linkedinFound)}${linkedinSummary(r)}`;
   }
   const failed = r.result.failedCharts?.length ?? 0;
   const llmErrors = r.result.llmErrors ?? 0;
-  return `просканировано ${fmt(r.result.scanned)}, оценено ${fmt(r.result.saved)}, почта +${fmt(r.result.contactsFound)}${failed ? ` · <span class="warn">чартов не пришло: ${failed}</span>` : ''}${llmErrors ? ` · <span class="warn">ошибок оценки: ${llmErrors}</span>` : ''}`;
+  return `просканировано ${fmt(r.result.scanned)}, оценено ${fmt(r.result.saved)}, почта +${fmt(r.result.contactsFound)}${failed ? ` · <span class="warn">чартов не пришло: ${failed}</span>` : ''}${llmErrors ? ` · <span class="warn">ошибок оценки: ${llmErrors}</span>` : ''}${linkedinSummary(r)}`;
 }
 
 function scope(r: RunRow): string {
@@ -50,7 +57,13 @@ function scope(r: RunRow): string {
 const check = (name: string, value: string, label: string, checked: boolean, extra = '') =>
   `<label class="chk"><input type="checkbox" name="${name}" value="${esc(value)}"${checked ? ' checked' : ''} ${extra}> ${esc(label)}</label>`;
 
-export function renderSettingsPage(o: { settings: ParseSettings; run: CurrentRun | null; runs: RunRow[]; flash?: Flash }): string {
+export function renderSettingsPage(o: {
+  settings: ParseSettings;
+  run: CurrentRun | null;
+  runs: RunRow[];
+  flash?: Flash;
+  searchEnabled?: boolean;
+}): string {
   const s = o.settings;
   const est = estimate(s);
   const has = (list: string[], v: string) => list.includes(v);
@@ -103,6 +116,11 @@ export function renderSettingsPage(o: { settings: ParseSettings; run: CurrentRun
       <button type="submit"${running ? ' disabled title="Сбор уже идёт"' : ''}>Дособрать контакты и LinkedIn</button>
       <span class="mut small">Без модели: почта и LinkedIn для уже найденных лидов, у которых их ещё не искали. Работает и при исчерпанном лимите Anthropic.</span>
     </form>
+    <p class="small">${
+      o.searchEnabled
+        ? '<span class="ok">Автопоиск LinkedIn включён</span> (Serper): после сбора контактов для целевых лидов ищутся страница компании и люди — CEO, основатели, маркетинг.'
+        : '<span class="mut">Автопоиск LinkedIn выключен: задай переменную SERPER_API_KEY (ключ с serper.dev).</span>'
+    }</p>
     ${runsTable}</div>
 
   <form method="post" action="/settings" id="f">

@@ -145,26 +145,47 @@ export function brandFrom(h: BrandHints): string | null {
   return null;
 }
 
-export function linkedinSearchLinks(developer: string, hints: BrandHints | string | null = null): LinkedInSearch {
+export interface LinkedInQueries {
+  person: boolean;         // разработчик — частное лицо
+  terms: string[];         // бренд и/или название — по ним проверяем, что результат про нужную компанию
+  companyKeywords: string; // для поиска компаний внутри LinkedIn
+  companyQuery: string;    // Google: site:linkedin.com/company …
+  peopleQuery: string;     // Google: site:linkedin.com/in … с ролями
+}
+
+/** Поисковые запросы для лида — общие для ссылок в таблице и для автопоиска через API. */
+export function linkedinQueries(developer: string, hints: BrandHints | string | null = null): LinkedInQueries {
   const name = companyName(developer);
   const brand = brandFrom(typeof hints === 'string' || hints === null ? { website: hints } : hints);
   const person = looksLikePerson(developer);
-  const q = (s: string) => encodeURIComponent(s);
   const quoted = (s: string) => `"${s}"`;
   // оба варианта, если бренд отличается от юрлица
-  const names = [...new Set([brand, name].filter((v): v is string => !!v).map((v) => v.trim()))];
-  const either = names.length > 1 ? `(${names.map(quoted).join(' OR ')})` : quoted(names[0]);
-
+  const terms = [...new Set([brand, name].filter((v): v is string => !!v).map((v) => v.trim()))];
+  const either = terms.length > 1 ? `(${terms.map(quoted).join(' OR ')})` : quoted(terms[0]);
   if (person) {
     return {
-      company: `https://www.linkedin.com/search/results/companies/?keywords=${q(brand ?? name)}`,
-      people: `https://www.google.com/search?q=${q(`site:linkedin.com/in ${quoted(name)}`)}`,
-      google: `https://www.google.com/search?q=${q(`site:linkedin.com ${either}`)}`,
+      person,
+      terms,
+      companyKeywords: brand ?? name,
+      companyQuery: `site:linkedin.com ${either}`,
+      peopleQuery: `site:linkedin.com/in ${quoted(name)}`,
     };
   }
   return {
-    company: `https://www.linkedin.com/search/results/companies/?keywords=${q(quoted(brand ?? name))}`,
-    people: `https://www.google.com/search?q=${q(`site:linkedin.com/in ${either} ${ROLES}`)}`,
-    google: `https://www.google.com/search?q=${q(`site:linkedin.com/company ${either}`)}`,
+    person,
+    terms,
+    companyKeywords: quoted(brand ?? name),
+    companyQuery: `site:linkedin.com/company ${either}`,
+    peopleQuery: `site:linkedin.com/in ${either} ${ROLES}`,
+  };
+}
+
+export function linkedinSearchLinks(developer: string, hints: BrandHints | string | null = null): LinkedInSearch {
+  const lq = linkedinQueries(developer, hints);
+  const q = (s: string) => encodeURIComponent(s);
+  return {
+    company: `https://www.linkedin.com/search/results/companies/?keywords=${q(lq.companyKeywords)}`,
+    people: `https://www.google.com/search?q=${q(lq.peopleQuery)}`,
+    google: `https://www.google.com/search?q=${q(lq.companyQuery)}`,
   };
 }

@@ -184,7 +184,11 @@ export async function saveContacts(trackId: string, c: Contacts): Promise<void> 
     `UPDATE leads SET
        website=$2, support_url=$3, privacy_url=$4, play_url=$5,
        email=$6, email_source=$7, emails=$8, email_personal=$9,
-       linkedin_url=$10, linkedin_kind=$11, contacts_version=$12, contacts_checked_at=now()
+       -- ссылка с сайта важнее; если на сайте нет — оставляем найденную поиском
+       linkedin_url = CASE WHEN $10::text IS NOT NULL THEN $10 WHEN linkedin_source = 'search' THEN linkedin_url END,
+       linkedin_kind = CASE WHEN $10::text IS NOT NULL THEN $11 WHEN linkedin_source = 'search' THEN linkedin_kind END,
+       linkedin_source = CASE WHEN $10::text IS NOT NULL THEN 'site' WHEN linkedin_source = 'search' THEN 'search' END,
+       contacts_version=$12, contacts_checked_at=now()
      WHERE track_id=$1`,
     [
       trackId, c.website, c.supportUrl, c.privacyUrl, c.playUrl, c.email, c.emailSource, c.emails, c.emailPersonal,
@@ -195,6 +199,47 @@ export async function saveContacts(trackId: string, c: Contacts): Promise<void> 
 
 /** Вид таблицы: active — целевые и под вопросом (целевые первыми), либо один уровень. */
 export type LeadView = 'active' | Tier;
+
+export interface LinkedInSearchTarget {
+  trackId: string;
+  name: string;
+  developer: string;
+  website: string | null;
+  email: string | null;
+  supportUrl: string | null;
+  privacyUrl: string | null;
+}
+
+/** Целевые лиды, для которых ещё не искали LinkedIn через API — лучшие первыми. */
+export async function leadsNeedingLinkedInSearch(limit: number): Promise<LinkedInSearchTarget[]> {
+  const { rows } = await pool.query(
+    `SELECT track_id, name, developer, COALESCE(website, seller_url) AS website, email, support_url, privacy_url
+     FROM leads
+     WHERE tier = 'target' AND linkedin_searched_at IS NULL
+     ORDER BY fit_score DESC NULLS LAST, (email IS NOT NULL) DESC
+     LIMIT $1`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    trackId: r.track_id, name: r.name, developer: r.developer, website: r.website,
+    email: r.email, supportUrl: r.support_url, privacyUrl: r.privacy_url,
+  }));
+}
+
+export async function saveLinkedInSearch(
+  trackId: string,
+  found: { companyUrl: string | null; people: Array<{ name: string; title: string | null; url: string }> },
+): Promise<void> {
+  await pool.query(
+    `UPDATE leads SET
+       linkedin_people = $2, linkedin_searched_at = now(),
+       linkedin_kind = CASE WHEN linkedin_url IS NULL AND $3::text IS NOT NULL THEN 'company' ELSE linkedin_kind END,
+       linkedin_source = CASE WHEN linkedin_url IS NULL AND $3::text IS NOT NULL THEN 'search' ELSE linkedin_source END,
+       linkedin_url = COALESCE(linkedin_url, $3)
+     WHERE track_id = $1`,
+    [trackId, JSON.stringify(found.people), found.companyUrl],
+  );
+}
 
 export interface LeadFilter {
   view?: LeadView;
@@ -212,7 +257,7 @@ export async function topLeads(limit = 100, { view = 'active', withEmail = false
             country_count, countries, best_rank, in_grossing, rating_count,
             publisher_apps, publisher_ratings,
             ${TIER_SQL} AS tier, tier_reason, fit_score, pitch_hook, reasons,
-            email, email_source, emails, email_personal, linkedin_url, linkedin_kind,
+            email, email_source, emails, email_personal, linkedin_url, linkedin_kind, linkedin_people, linkedin_source,
             COALESCE(website, seller_url) AS website, support_url, privacy_url, play_url,
             contacts_checked_at, qualified_at, last_seen
      FROM leads

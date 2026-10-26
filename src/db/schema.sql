@@ -82,3 +82,8 @@ CREATE TABLE IF NOT EXISTS runs (
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_url     TEXT;
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_kind    TEXT;   -- company | person
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS contacts_version INT;
+
+-- v6: автопоиск LinkedIn через поисковый API: люди (имя, должность, ссылка) и откуда ссылка на компанию
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_people      JSONB;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_source      TEXT;   -- site | search
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_searched_at TIMESTAMPTZ;

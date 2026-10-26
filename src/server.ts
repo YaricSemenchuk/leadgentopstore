@@ -11,6 +11,7 @@ import { linkedinSearchLinks } from './contacts/linkedin.js';
 const app = express();
 
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD ?? '';
+const searchEnabled = !!config.search.apiKey;
 const INGEST_TOKEN = process.env.INGEST_TOKEN ?? '';
 
 function safeEqual(a: string, b: string): boolean {
@@ -99,6 +100,7 @@ const CSV_COLUMNS: Array<[string, (r: any) => unknown]> = [
   ['email_personal', (r) => (r.email_personal ? 'yes' : '')],
   ['other_emails', (r) => (r.emails ?? []).join(' ')],
   ['linkedin', (r) => r.linkedin_url],
+  ['linkedin_people', (r) => (r.linkedin_people ?? []).map((p: any) => `${p.name}${p.title ? ` (${p.title})` : ''} ${p.url}`).join(' | ')],
   ['linkedin_kind', (r) => r.linkedin_kind],
   ['linkedin_company_search', (r) => linkedinSearchLinks(r.developer, brandHints(r)).company],
   ['linkedin_people_search', (r) => linkedinSearchLinks(r.developer, brandHints(r)).people],
@@ -162,7 +164,13 @@ app.get('/', wrap(async (req, res) => {
         .filter(Boolean)
         .join(' · ');
       const li = linkedinSearchLinks(r.developer, brandHints(r));
-      const liSearch = `<div class="small mut">найти в LinkedIn: ${link(li.company, 'компания')} · ${link(li.google, 'компания через Google')} · ${link(li.people, 'люди: CEO, маркетинг')}</div>`;
+      const people = (r.linkedin_people ?? []) as Array<{ name: string; title: string | null; url: string }>;
+      const peopleHtml = people.length
+        ? `<div class="small people">${people
+            .map((p) => `${link(p.url, esc(p.name))}${p.title ? ` <span class="mut">— ${esc(p.title)}</span>` : ''}`)
+            .join('<br>')}</div>`
+        : '';
+      const liSearch = `${peopleHtml}<div class="small mut">найти в LinkedIn: ${link(li.company, 'компания')} · ${link(li.google, 'компания через Google')} · ${link(li.people, 'люди: CEO, маркетинг')}</div>`;
       const publisher =
         r.publisher_apps !== null && r.publisher_apps !== undefined
           ? `издатель: ${fmt(r.publisher_apps)} прил. · ${fmt(r.publisher_ratings)} отзывов`
@@ -215,7 +223,8 @@ app.get('/', wrap(async (req, res) => {
   .dev{color:var(--mut);font-size:12px} .src{font-size:12px;color:var(--mut)}
   .mail{font-weight:600;overflow-wrap:anywhere} td.contact{min-width:240px} td.fit-cell{min-width:110px}
   .tier{display:inline-block;margin-top:4px;padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid var(--line)}
-  .t-target{color:#4cc38a;border-color:#2b6b4d} .t-maybe{color:var(--warn);border-color:#6b5428} .t-skip{color:var(--mut)}`,
+  .t-target{color:#4cc38a;border-color:#2b6b4d} .t-maybe{color:var(--warn);border-color:#6b5428} .t-skip{color:var(--mut)}
+  .people{margin-top:4px;line-height:1.5}`,
     }),
   );
 }));
@@ -235,7 +244,7 @@ app.get('/settings', wrap(async (req, res) => {
   const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
   let flash = FLASH[String(req.query.ok ?? '')];
   if (req.query.started) flash = { kind: 'ok', text: `Сбор #${Number(req.query.started)} запущен — статус обновляется на этой странице.` };
-  res.type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash }));
+  res.type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash, searchEnabled }));
 }));
 
 app.post('/settings', wrap(async (req, res) => {
@@ -253,7 +262,7 @@ app.post('/settings', wrap(async (req, res) => {
   if (!parsed.success) {
     const text = parsed.error.issues.map((i) => i.message).join('; ');
     const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
-    res.status(400).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash: { kind: 'bad', text: `Не сохранено: ${text}` } }));
+    res.status(400).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, flash: { kind: 'bad', text: `Не сохранено: ${text}` } }));
     return;
   }
   await saveParseSettings(parsed.data);
@@ -267,7 +276,7 @@ app.post('/settings', wrap(async (req, res) => {
     return;
   }
   const runs = await recentRuns();
-  res.status(409).type('html').send(renderSettingsPage({ settings: parsed.data, run: currentRun(), runs, flash: { kind: 'bad', text: `Сохранено, но сбор не запущен: ${r.reason}` } }));
+  res.status(409).type('html').send(renderSettingsPage({ settings: parsed.data, run: currentRun(), runs, searchEnabled, flash: { kind: 'bad', text: `Сохранено, но сбор не запущен: ${r.reason}` } }));
 }));
 
 app.post('/runs/contacts', wrap(async (_req, res) => {
@@ -277,7 +286,7 @@ app.post('/runs/contacts', wrap(async (_req, res) => {
     return;
   }
   const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
-  res.status(409).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash: { kind: 'bad', text: `Не запущено: ${r.reason}` } }));
+  res.status(409).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, flash: { kind: 'bad', text: `Не запущено: ${r.reason}` } }));
 }));
 
 app.get('/api/run-status', wrap(async (_req, res) => {

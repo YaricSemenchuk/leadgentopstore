@@ -7,9 +7,10 @@ import { lookupPublishers, lookupWithFallback } from '../apple/lookup.js';
 import { buildCandidates, heuristicSignals, priorityScore, type Candidate } from '../pipeline/aggregate.js';
 import { llmErrorText, qualifyCandidate } from '../llm/qualify.js';
 import { enrichContacts } from '../contacts/enrich.js';
+import { findLinkedIn, SearchApiError } from '../contacts/people-search.js';
 import {
-  hideExcludedPublishers, initSchema, leadsForRescore, leadsNeedingContacts, pool, recentlyQualified,
-  refreshSignals, saveContacts, saveQualification, upsertLead,
+  hideExcludedPublishers, initSchema, leadsForRescore, leadsNeedingContacts, leadsNeedingLinkedInSearch, pool,
+  recentlyQualified, refreshSignals, saveContacts, saveLinkedInSearch, saveQualification, upsertLead,
 } from '../db/pool.js';
 import { getParseSettings, type ParseSettings } from '../settings.js';
 
@@ -49,6 +50,54 @@ export interface PipelineResult {
   contactsFound: number;
   llmErrors: number;
   failedCharts: string[];
+  linkedin?: LinkedInSearchResult;
+}
+
+export interface LinkedInSearchResult {
+  searched: number;
+  companies: number;
+  people: number;
+  error?: string;
+  skipped?: string;
+}
+
+/**
+ * Автопоиск LinkedIn через поисковый API для целевых лидов, у которых ещё не искали.
+ * Без ключа — пропуск. Если API отклонил ключ или кончились кредиты — останавливаемся,
+ * прогон при этом не падает: почта и остальное уже собраны.
+ */
+export async function runLinkedInSearch(report: Report = silent): Promise<LinkedInSearchResult> {
+  if (!config.search.apiKey) return { searched: 0, companies: 0, people: 0, skipped: 'SERPER_API_KEY не задан' };
+  const targets = await leadsNeedingLinkedInSearch(config.search.maxPerRun);
+  if (targets.length === 0) return { searched: 0, companies: 0, people: 0 };
+  console.log(`  LinkedIn: ищу для ${targets.length} лидов`);
+  const gate = pLimit(2);
+  const result: LinkedInSearchResult = { searched: 0, companies: 0, people: 0 };
+  let stop = false;
+  report(`LinkedIn 0/${targets.length}`);
+  await Promise.all(
+    targets.map((t) =>
+      gate(async () => {
+        if (stop) return;
+        try {
+          const found = await findLinkedIn(t.developer, t);
+          await saveLinkedInSearch(t.trackId, found);
+          result.searched++;
+          if (found.companyUrl) result.companies++;
+          result.people += found.people.length;
+        } catch (e) {
+          if (e instanceof SearchApiError && e.fatal) {
+            stop = true;
+            result.error = e.message;
+          }
+          console.warn(`  ⚠ LinkedIn ${t.name}: ${(e as Error).message}`);
+        }
+        report(`LinkedIn ${result.searched}/${targets.length}, компаний ${result.companies}, людей ${result.people}`);
+      }),
+    ),
+  );
+  console.log(`  LinkedIn: компании у ${result.companies}, людей ${result.people} из ${result.searched} лидов${result.error ? ` — остановлено: ${result.error}` : ''}`);
+  return result;
 }
 
 /** Все оценки упали — это не «оценено 0», а сломанный ключ, лимит или недоступный API. */
@@ -242,24 +291,27 @@ export async function runPipeline({ dryRun = false, settings, report = silent }:
   console.log(`  оценено моделью: ${saved} / ${toQualify.length}`);
   assertLlmWorked(toQualify.length, saved, failedLlm, firstLlmError);
 
-  // 7. Контакты для подходящих лидов
+  // 7. Контакты для подходящих лидов, затем автопоиск LinkedIn для целевых
   const contacts = await runContacts(report);
+  const linkedin = await runLinkedInSearch(report);
 
   const dt = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`✅ готово за ${dt}s — просканировано ${candidates.length}, оценено ${saved}, с почтой +${contacts.found}`);
   return {
     scanned: candidates.length, targets: targets.length, qualified: toQualify.length, saved,
     contactsChecked: contacts.checked, contactsFound: contacts.found, llmErrors: failedLlm, failedCharts: failed,
+    linkedin,
   };
 }
 
-// Прямой запуск: npm run ingest [-- --dry-run | --contacts-only | --rescore | --rescore-all]
+// Прямой запуск: npm run ingest [-- --dry-run | --contacts-only | --linkedin | --rescore | --rescore-all]
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const arg = (flag: string) => process.argv.includes(flag);
   try {
     // схема нужна и dry run'у: он пишет только в кэш чартов
     if (config.databaseUrl) await initSchema();
     if (arg('--contacts-only')) await runContacts();
+    else if (arg('--linkedin')) await runLinkedInSearch();
     else if (arg('--rescore') || arg('--rescore-all')) await runRescore({ all: arg('--rescore-all') });
     else await runPipeline({ dryRun: arg('--dry-run') });
   } catch (e) {

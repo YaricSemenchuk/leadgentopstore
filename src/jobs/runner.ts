@@ -1,6 +1,6 @@
 import { pool } from '../db/pool.js';
 import { getParseSettings } from '../settings.js';
-import { llmKeyMissing, runContacts, runPipeline } from './run-pipeline.js';
+import { llmKeyMissing, runContacts, runLinkedInSearch, runPipeline, type LinkedInSearchResult } from './run-pipeline.js';
 
 /**
  * Запуск прохода из дашборда или по API: не больше одного одновременно (сервис на Railway
@@ -55,7 +55,12 @@ export async function startRun(
   const report = (stage: string) => (run.stage = stage);
   const work =
     kind === 'contacts'
-      ? runContacts(report).then((r) => ({ contactsChecked: r.checked, contactsFound: r.found, linkedinFound: r.linkedin }))
+      ? runContacts(report).then(async (r) => ({
+          contactsChecked: r.checked,
+          contactsFound: r.found,
+          linkedinFound: r.linkedin,
+          linkedin: await runLinkedInSearch(report),
+        }))
       : runPipeline({ settings, report });
   work
     .then((result) =>
@@ -80,7 +85,7 @@ export interface RunRow {
   finished_at: Date | null;
   result: {
     scanned?: number; saved?: number; contactsChecked?: number; contactsFound?: number; linkedinFound?: number;
-    llmErrors?: number; failedCharts?: string[];
+    llmErrors?: number; failedCharts?: string[]; linkedin?: LinkedInSearchResult;
   } | null;
   error: string | null;
   params: { kind?: RunKind; countries?: string[]; genres?: string[]; charts?: string[] } | null;
