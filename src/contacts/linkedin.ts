@@ -110,8 +110,14 @@ export function brandFromWebsite(website: string | null | undefined): string | n
     ? parts[parts.length - 3]
     : parts[parts.length - 2];
   if (!label || label.length < 3 || GENERIC_HOSTS.has(label)) return null;
-  return label.replace(/[-_]+/g, ' ');
+  const tld = parts[parts.length - 1];
+  // доменная зона-слово — часть названия: gryphon.games → «gryphon games», sunquest.app → «sunquest app»
+  const words = label.replace(/[-_]+/g, ' ') + (WORD_TLDS.has(tld) ? ` ${tld}` : '');
+  // юридическая форма в домене — не бренд: bravo-inc.store → «bravo»
+  return companyName(words);
 }
+
+const WORD_TLDS = new Set(['games', 'game', 'studio', 'studios', 'app', 'apps', 'software', 'digital', 'media', 'tech', 'ventures', 'agency']);
 
 export interface LinkedInSearch {
   company: string;   // компания: поиск в LinkedIn по бренду / названию

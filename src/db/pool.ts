@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import type { Candidate } from '../pipeline/aggregate.js';
 import type { Lead } from '../llm/qualify.js';
 import { CONTACTS_VERSION, type Contacts } from '../contacts/enrich.js';
+import { LINKEDIN_SEARCH_VERSION } from '../contacts/people-search.js';
 import type { Tier } from '../pipeline/tier.js';
 
 export const pool = new pg.Pool({ connectionString: config.databaseUrl });
@@ -210,15 +211,21 @@ export interface LinkedInSearchTarget {
   privacyUrl: string | null;
 }
 
-/** Целевые лиды, для которых ещё не искали LinkedIn через API — лучшие первыми. */
+/**
+ * Целевые лиды для автопоиска LinkedIn — лучшие первыми: где ещё не искали, и где старые
+ * правила что-то нашли (их перепроверяем; где не нашли — новые, более строгие, тоже не найдут).
+ */
 export async function leadsNeedingLinkedInSearch(limit: number): Promise<LinkedInSearchTarget[]> {
   const { rows } = await pool.query(
     `SELECT track_id, name, developer, COALESCE(website, seller_url) AS website, email, support_url, privacy_url
      FROM leads
-     WHERE tier = 'target' AND linkedin_searched_at IS NULL
+     WHERE tier = 'target'
+       AND (linkedin_searched_at IS NULL
+            OR (COALESCE(linkedin_search_version, 1) < $2
+                AND (jsonb_array_length(COALESCE(linkedin_people, '[]'::jsonb)) > 0 OR linkedin_source = 'search')))
      ORDER BY fit_score DESC NULLS LAST, (email IS NOT NULL) DESC
      LIMIT $1`,
-    [limit],
+    [limit, LINKEDIN_SEARCH_VERSION],
   );
   return rows.map((r) => ({
     trackId: r.track_id, name: r.name, developer: r.developer, website: r.website,
@@ -232,12 +239,13 @@ export async function saveLinkedInSearch(
 ): Promise<void> {
   await pool.query(
     `UPDATE leads SET
-       linkedin_people = $2, linkedin_searched_at = now(),
-       linkedin_kind = CASE WHEN linkedin_url IS NULL AND $3::text IS NOT NULL THEN 'company' ELSE linkedin_kind END,
-       linkedin_source = CASE WHEN linkedin_url IS NULL AND $3::text IS NOT NULL THEN 'search' ELSE linkedin_source END,
-       linkedin_url = COALESCE(linkedin_url, $3)
+       linkedin_people = $2, linkedin_searched_at = now(), linkedin_search_version = $4,
+       -- ссылка с сайта разработчика не трогается; найденная поиском заменяется новым результатом
+       linkedin_url = CASE WHEN linkedin_source = 'site' THEN linkedin_url ELSE $3 END,
+       linkedin_kind = CASE WHEN linkedin_source = 'site' THEN linkedin_kind WHEN $3::text IS NOT NULL THEN 'company' END,
+       linkedin_source = CASE WHEN linkedin_source = 'site' THEN 'site' WHEN $3::text IS NOT NULL THEN 'search' END
      WHERE track_id = $1`,
-    [trackId, JSON.stringify(found.people), found.companyUrl],
+    [trackId, JSON.stringify(found.people), found.companyUrl, LINKEDIN_SEARCH_VERSION],
   );
 }
 

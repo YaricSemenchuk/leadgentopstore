@@ -87,3 +87,6 @@ ALTER TABLE leads ADD COLUMN IF NOT EXISTS contacts_version INT;
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_people      JSONB;
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_source      TEXT;   -- site | search
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_searched_at TIMESTAMPTZ;
+
+-- v7: версия правил автопоиска LinkedIn — найденное старыми правилами перепроверяется
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_search_version INT;

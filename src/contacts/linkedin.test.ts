@@ -68,6 +68,13 @@ test('без сайта — по юрлицу; частное лицо — пр�
 
 test('без сайта бренд берётся из домена почты, но не из gmail', () => {
   assert.equal(brandFrom({ email: 'service@lastshelter.net' }), 'lastshelter');
-  assert.equal(brandFrom({ email: 'novaskygames1977@gmail.com', supportUrl: 'https://help.novasky.games/x' }), 'novasky');
+  assert.equal(brandFrom({ email: 'novaskygames1977@gmail.com', supportUrl: 'https://help.novasky.games/x' }), 'novasky games');
   assert.equal(brandFrom({ email: 'dev@gmail.com' }), null);
+});
+
+test('доменная зона-слово входит в бренд, юридическая форма — нет', () => {
+  assert.equal(brandFromWebsite('https://www.gryphon.games/'), 'gryphon games');
+  assert.equal(brandFromWebsite('https://sunquest.app'), 'sunquest app');
+  assert.equal(brandFromWebsite('https://bravo-inc.store/app-ads.txt'), 'bravo');
+  assert.equal(brandFromWebsite('https://lava.gs'), 'lava');
 });

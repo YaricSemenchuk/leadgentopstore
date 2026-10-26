@@ -117,3 +117,37 @@ test('бренд должен стоять на месте работодате�
     ['Ece Yildiz'],
   );
 });
+
+test('однословный бренд не цепляет чужие фирмы: Gryphon Strategies, SunQuest Solar', () => {
+  const gryphon = linkedinQueries('Gryphon Games UG (haftungsbeschrankt)', { website: 'https://www.gryphon.games/' });
+  const hits: SearchHit[] = [
+    { title: 'Jo Day - President & CEO, Gryphon Strategies', link: 'https://www.linkedin.com/in/jo-day', snippet: '' },
+    { title: 'Dan Ruiz - Co-Founder @ Gryphon Games', link: 'https://www.linkedin.com/in/dan-ruiz', snippet: '' },
+  ];
+  assert.deepEqual(pickPeople(hits, gryphon).map((p) => p.name), ['Dan Ruiz']);
+  const sun = linkedinQueries('Apextens', { website: 'https://sunquest.app', email: 'contact@apextens.io' });
+  const sunHits: SearchHit[] = [
+    { title: 'Ty Barg - Founder at SunQuest Marketing, LLC.', link: 'https://www.linkedin.com/in/ty', snippet: '' },
+    { title: 'Mia Chen - CEO at Apextens', link: 'https://www.linkedin.com/in/mia', snippet: '' },
+  ];
+  assert.deepEqual(pickPeople(sunHits, sun).map((p) => p.name), ['Mia Chen']);
+});
+
+test('бывшая работа в заголовке не считается, если «Опыт» — другая компания', () => {
+  const mullvad = linkedinQueries('Mullvad VPN AB', { website: 'https://mullvad.net/' });
+  const hits: SearchHit[] = [
+    { title: 'Jon J. - Founder, Encuro AB · Former CEO, Mullvad VPN', link: 'https://se.linkedin.com/in/jon', snippet: 'Experience: Encuro AB' },
+    { title: 'Ida N. - Head of Marketing', link: 'https://se.linkedin.com/in/ida', snippet: 'Head of Marketing · Experience: Mullvad VPN' },
+  ];
+  assert.deepEqual(pickPeople(hits, mullvad).map((p) => p.name), ['Ida N.']);
+});
+
+test('частный разработчик: однофамильцы не из разработки отбрасываются', () => {
+  const q = linkedinQueries('Thu Nguyen', {});
+  const hits: SearchHit[] = [
+    { title: 'Thu Nguyen - Non-profit executive leading through culture', link: 'https://www.linkedin.com/in/thu-1', snippet: '' },
+    { title: 'Thu Nguyen - Senior Research Associate at Duke', link: 'https://www.linkedin.com/in/thu-2', snippet: '' },
+    { title: 'Thu Nguyen - Indie iOS Developer', link: 'https://vn.linkedin.com/in/thu-3', snippet: '' },
+  ];
+  assert.deepEqual(pickPeople(hits, q).map((p) => p.url), ['https://www.linkedin.com/in/thu-3/']);
+});

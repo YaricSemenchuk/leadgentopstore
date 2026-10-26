@@ -41,6 +41,9 @@ const SerperResponse = z.object({
 
 const SERPER_URL = 'https://google.serper.dev/search';
 
+/** Версия правил отбора: при росте лиды, где поиск что-то нашёл, перепроверяются. */
+export const LINKEDIN_SEARCH_VERSION = 2;
+
 /** Один запрос к Serper. 401/403 — ключ неверный или кредиты кончились: дальше искать бессмысленно. */
 export async function serperSearch(q: string, apiKey = config.search.apiKey): Promise<SearchHit[]> {
   for (let attempt = 1; ; attempt++) {
@@ -85,10 +88,20 @@ function contains(text: string, term: string | null): boolean {
 const STRONG_LEN = 6;
 const isStrong = (t: string | null): t is string => !!t && norm(t).length >= STRONG_LEN;
 
-/** Надёжные названия для сверки: длинный бренд; если бренда нет или он короткий — длинное юрлицо. */
+// Типовые слова в юрлицах: «Muza Technologies», «Fuse Entertainment» совпадают у разных фирм.
+const GENERIC_WORDS = /\b(technolog(y|ies)|tech|entertainment|games?|studios?|software|digital|media|interactive|labs?|apps?|mobile|network|global|international|group|holdings?|solutions|systems|ventures|company|services|information|development)\b/gi;
+
+/** Юрлицо отличительное, если без типовых слов остаётся ≥ 6 букв («Apextens», «Stormborn»). */
+function distinctive(name: string): boolean {
+  return norm(name.replace(GENERIC_WORDS, ' ')).length >= STRONG_LEN;
+}
+
+/** Надёжные названия: длинный бренд + отличительное юрлицо; без бренда — длинное юрлицо. */
 function strongTerms(q: LinkedInQueries): string[] {
-  if (isStrong(q.brand)) return [q.brand];
-  return isStrong(q.name) ? [q.name] : [];
+  const terms: string[] = [];
+  if (isStrong(q.brand)) terms.push(q.brand);
+  if (isStrong(q.name) && (terms.length === 0 || distinctive(q.name))) terms.push(q.name);
+  return terms;
 }
 
 /**
@@ -171,6 +184,12 @@ export function currentEmployer(snippet: string): string | null {
   return null;
 }
 
+// Бывшее место работы — не повод писать: «Former CEO, Mullvad VPN».
+const FORMER = /\b(former|ex-|ex\s|previously|past|бывш)/i;
+
+// Частный разработчик: однофамильцев много, берём только профиль про разработку приложений.
+const DEV_PROFILE = /\b(developer|dev|indie|game|games|gamedev|app|apps|ios|android|mobile|software|engineer|programmer|unity|swift|flutter|studio)\b|разработчик|개발자|开发/i;
+
 const NOT_DECISION = /\b(recruit\w*|talent|human resources?|hr|intern|internship|student|trainee|assistant|customer support|support specialist|tester)\b/i;
 const ROLE_RANKS: Array<[RegExp, number]> = [
   [/\b(ceo|founder|co-?founder|owner|president|chief|cmo|coo|cto|cpo|managing director|general manager)\b|创始人|首席执行官|总经理|대표|창업자/i, 0],
@@ -207,7 +226,9 @@ export function pickPeople(hits: SearchHit[], q: LinkedInQueries, max = 3): Link
     const { name, title } = parseProfileTitle(h.title);
 
     if (q.person) {
-      if (contains(name, q.name)) {
+      const domainHit = domainsIn(`${title ?? ''} ${h.snippet}`).some((d) => q.domains.includes(d));
+      const devProfile = DEV_PROFILE.test(`${title ?? ''} ${currentEmployer(h.snippet) ?? ''}`);
+      if (contains(name, q.name) && (domainHit || devProfile)) {
         seen.add(url);
         found.push({ name, title, url, rank: 0 });
       }
@@ -215,8 +236,9 @@ export function pickPeople(hits: SearchHit[], q: LinkedInQueries, max = 3): Link
     }
     if ([q.brand, q.name].some((t) => contains(name, t))) continue; // «LastShelter Base» — не человек
     const employer = currentEmployer(h.snippet);
-    const headlineOurs = !!title && isOurs(title);
     const employerOurs = !!employer && isOurs(employer);
+    // «Former CEO, Mullvad VPN» — в заголовке бывшая работа; верим только полю «Опыт»
+    const headlineOurs = !!title && isOurs(title) && !FORMER.test(title);
     if (!headlineOurs && !employerOurs) continue;
     const ourPart = snippetParts(h.snippet).find((p) => isOurs(p)) ?? '';
     const rank = roleRank(title, ourPart);
