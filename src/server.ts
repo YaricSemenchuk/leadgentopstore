@@ -85,6 +85,8 @@ app.get('/api/leads', wrap(async (req, res) => {
   res.json(await topLeads(limit, filterFrom(req)));
 }));
 
+const brandHints = (r: any) => ({ website: r.website, email: r.email, supportUrl: r.support_url, privacyUrl: r.privacy_url });
+
 // CSV для рассылки. Поля приходят от сторонних разработчиков — экранируем формулы Excel.
 const CSV_COLUMNS: Array<[string, (r: any) => unknown]> = [
   ['tier', (r) => r.tier],
@@ -98,8 +100,8 @@ const CSV_COLUMNS: Array<[string, (r: any) => unknown]> = [
   ['other_emails', (r) => (r.emails ?? []).join(' ')],
   ['linkedin', (r) => r.linkedin_url],
   ['linkedin_kind', (r) => r.linkedin_kind],
-  ['linkedin_company_search', (r) => linkedinSearchLinks(r.developer).company],
-  ['linkedin_people_search', (r) => linkedinSearchLinks(r.developer).people],
+  ['linkedin_company_search', (r) => linkedinSearchLinks(r.developer, brandHints(r)).company],
+  ['linkedin_people_search', (r) => linkedinSearchLinks(r.developer, brandHints(r)).people],
   ['website', (r) => r.website],
   ['support_url', (r) => r.support_url],
   ['google_play', (r) => r.play_url],
@@ -159,8 +161,8 @@ app.get('/', wrap(async (req, res) => {
       ]
         .filter(Boolean)
         .join(' · ');
-      const li = linkedinSearchLinks(r.developer);
-      const liSearch = `<div class="small mut">найти в LinkedIn: ${link(li.company, 'компания')} · ${link(li.people, 'люди')} · ${link(li.google, 'Google')}</div>`;
+      const li = linkedinSearchLinks(r.developer, brandHints(r));
+      const liSearch = `<div class="small mut">найти в LinkedIn: ${link(li.company, 'компания')} · ${link(li.google, 'компания через Google')} · ${link(li.people, 'люди: CEO, маркетинг')}</div>`;
       const publisher =
         r.publisher_apps !== null && r.publisher_apps !== undefined
           ? `издатель: ${fmt(r.publisher_apps)} прил. · ${fmt(r.publisher_ratings)} отзывов`

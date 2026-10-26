@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { isFreeMailDomain } from './emails.js';
 
 /**
  * LinkedIn для лида. Сам LinkedIn не парсим (логин, антибот, ToS, персональные данные):
@@ -85,21 +86,85 @@ export function looksLikePerson(developer: string): boolean {
   return words.length >= 2 && words.length <= 3;
 }
 
-export interface LinkedInSearch {
-  company: string;   // поиск компании в LinkedIn
-  people: string;    // поиск людей: основатель / CEO / маркетинг (или сам разработчик-частное лицо)
-  google: string;    // запасной путь: Google по site:linkedin.com
+// Хостинги и платформы: их домен — не бренд разработчика.
+const GENERIC_HOSTS = new Set([
+  'github', 'gitlab', 'notion', 'wixsite', 'wix', 'blogspot', 'wordpress', 'weebly', 'carrd', 'webflow',
+  'google', 'apple', 'facebook', 'instagram', 'twitter', 'x', 'tiktok', 'youtube', 'linktr', 'linkedin',
+  'itch', 'discord', 'telegram', 't', 'medium', 'substack', 'tumblr', 'helpshift', 'zendesk', 'freshdesk',
+  'zohodesk', 'termly', 'iubenda', 'freeprivacypolicy', 'privacypolicies', 'app-privacy-policy', 'firebaseapp',
+  'web', 'vercel', 'netlify', 'herokuapp', 'pages', 'sites', 'feishu', 'larksuite', 'qq', 'weixin', 'naver',
+]);
+
+/** Бренд по домену сайта: «https://www.lastshelter.net» → «lastshelter», «muza-technologies.com» → «muza technologies». */
+export function brandFromWebsite(website: string | null | undefined): string | null {
+  if (!website) return null;
+  let host: string;
+  try {
+    host = new URL(website).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  const parts = host.replace(/^www\./, '').split('.');
+  // второй уровень: foo.co.kr → foo, foo.com → foo
+  const label = parts.length >= 3 && parts[parts.length - 2].length <= 3 && parts[parts.length - 1].length === 2
+    ? parts[parts.length - 3]
+    : parts[parts.length - 2];
+  if (!label || label.length < 3 || GENERIC_HOSTS.has(label)) return null;
+  return label.replace(/[-_]+/g, ' ');
 }
 
-export function linkedinSearchLinks(developer: string): LinkedInSearch {
+export interface LinkedInSearch {
+  company: string;   // компания: поиск в LinkedIn по бренду / названию
+  people: string;    // люди: Google по профилям LinkedIn с ролями (CEO, founder, marketing, UA)
+  google: string;    // компания через Google: site:linkedin.com/company
+}
+
+const ROLES = '(CEO OR founder OR "co-founder" OR marketing OR growth OR "user acquisition" OR publishing)';
+
+/**
+ * Ссылки поиска. Ищем по бренду (домен сайта), а не по юрлицу: страница в LinkedIn обычно
+ * называется как продукт или студия, а не «XYZ Technology Pte. Ltd.». Точная фраза в кавычках
+ * отсекает однофамильцев. Людей ищем через Google по site:linkedin.com/in — внутренний поиск
+ * LinkedIn с ролями часто пуст.
+ */
+export interface BrandHints {
+  website?: string | null;
+  email?: string | null;
+  supportUrl?: string | null;
+  privacyUrl?: string | null;
+}
+
+/** Бренд по первому подходящему домену: сайт → почта (не gmail и т.п.) → поддержка → политика. */
+export function brandFrom(h: BrandHints): string | null {
+  const emailDomain = h.email?.split('@')[1];
+  const fromEmail = emailDomain && !isFreeMailDomain(emailDomain) ? `https://${emailDomain}` : null;
+  for (const url of [h.website, fromEmail, h.supportUrl, h.privacyUrl]) {
+    const b = brandFromWebsite(url);
+    if (b) return b;
+  }
+  return null;
+}
+
+export function linkedinSearchLinks(developer: string, hints: BrandHints | string | null = null): LinkedInSearch {
   const name = companyName(developer);
+  const brand = brandFrom(typeof hints === 'string' || hints === null ? { website: hints } : hints);
   const person = looksLikePerson(developer);
   const q = (s: string) => encodeURIComponent(s);
+  const quoted = (s: string) => `"${s}"`;
+  // оба варианта, если бренд отличается от юрлица
+  const names = [...new Set([brand, name].filter((v): v is string => !!v).map((v) => v.trim()))];
+  const either = names.length > 1 ? `(${names.map(quoted).join(' OR ')})` : quoted(names[0]);
+
+  if (person) {
+    return {
+      company: `https://www.linkedin.com/search/results/companies/?keywords=${q(brand ?? name)}`,
+      people: `https://www.google.com/search?q=${q(`site:linkedin.com/in ${quoted(name)}`)}`,
+      google: `https://www.google.com/search?q=${q(`site:linkedin.com ${either}`)}`,
+    };
+  }
   return {
-    company: `https://www.linkedin.com/search/results/companies/?keywords=${q(name)}`,
-    people: person
-      ? `https://www.linkedin.com/search/results/people/?keywords=${q(name)}`
-      : `https://www.linkedin.com/search/results/people/?keywords=${q(`${name} (founder OR CEO OR marketing OR growth OR "user acquisition")`)}`,
-    google: `https://www.google.com/search?q=${q(`site:linkedin.com/${person ? 'in' : 'company'} "${name}"`)}`,
+    company: `https://www.linkedin.com/search/results/companies/?keywords=${q(quoted(brand ?? name))}`,
+    people: `https://www.google.com/search?q=${q(`site:linkedin.com/in ${either} ${ROLES}`)}`,
+    google: `https://www.google.com/search?q=${q(`site:linkedin.com/company ${either}`)}`,
   };
 }

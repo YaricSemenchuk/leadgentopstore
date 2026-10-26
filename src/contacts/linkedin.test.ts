@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { companyName, extractLinkedIn, linkedinSearchLinks, looksLikePerson } from './linkedin.js';
+import { brandFrom, brandFromWebsite, companyName, extractLinkedIn, linkedinSearchLinks, looksLikePerson } from './linkedin.js';
 
 test('ссылка на компанию из подвала сайта нормализуется', () => {
   const html = '<footer><a href="https://tr.linkedin.com/company/fusegamestr?trk=footer">in</a></footer>';
@@ -40,12 +40,34 @@ test('частное лицо распознаётся, компания — н�
   assert.equal(looksLikePerson('5minlab'), false);
 });
 
-test('ссылки поиска: компания и люди с ролями; для частного лица — по имени', () => {
+test('бренд берётся из домена сайта, платформы — нет', () => {
+  assert.equal(brandFromWebsite('https://www.lastshelter.net/'), 'lastshelter');
+  assert.equal(brandFromWebsite('https://muza-technologies.com/vpn'), 'muza technologies');
+  assert.equal(brandFromWebsite('https://www.neptunecompany.co.kr'), 'neptunecompany');
+  assert.equal(brandFromWebsite('https://foo.github.io/app'), null);
+  assert.equal(brandFromWebsite('https://sites.google.com/view/x'), null);
+  assert.equal(brandFromWebsite(null), null);
+});
+
+test('ссылки поиска: бренд и юрлицо точной фразой, люди через Google с ролями', () => {
+  const l = linkedinSearchLinks('LAST ORIGIN STUDIO LIMITED', 'https://www.lastshelter.net/');
+  assert.match(decodeURIComponent(l.company), /companies\/\?keywords="lastshelter"$/);
+  const people = decodeURIComponent(l.people);
+  assert.match(people, /google\.com\/search\?q=site:linkedin\.com\/in \("lastshelter" OR "LAST ORIGIN STUDIO"\)/);
+  assert.match(people, /CEO OR founder/);
+  assert.match(decodeURIComponent(l.google), /site:linkedin\.com\/company \("lastshelter" OR "LAST ORIGIN STUDIO"\)/);
+});
+
+test('без сайта — по юрлицу; частное лицо — профиль по имени', () => {
   const company = linkedinSearchLinks('GAME SPARK PTE. LTD.');
-  assert.match(company.company, /companies\/\?keywords=GAME%20SPARK$/);
-  assert.match(decodeURIComponent(company.people), /GAME SPARK \(founder OR CEO/);
-  assert.match(decodeURIComponent(company.google), /site:linkedin\.com\/company "GAME SPARK"/);
+  assert.match(decodeURIComponent(company.company), /keywords="GAME SPARK"$/);
+  assert.match(decodeURIComponent(company.google), /site:linkedin\.com\/company "GAME SPARK"$/);
   const person = linkedinSearchLinks('Luong Vuong');
-  assert.match(person.people, /people\/\?keywords=Luong%20Vuong$/);
-  assert.match(decodeURIComponent(person.google), /site:linkedin\.com\/in "Luong Vuong"/);
+  assert.match(decodeURIComponent(person.people), /site:linkedin\.com\/in "Luong Vuong"$/);
+});
+
+test('без сайта бренд берётся из домена почты, но не из gmail', () => {
+  assert.equal(brandFrom({ email: 'service@lastshelter.net' }), 'lastshelter');
+  assert.equal(brandFrom({ email: 'novaskygames1977@gmail.com', supportUrl: 'https://help.novasky.games/x' }), 'novasky');
+  assert.equal(brandFrom({ email: 'dev@gmail.com' }), null);
 });

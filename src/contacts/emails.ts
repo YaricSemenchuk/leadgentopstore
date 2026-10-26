@@ -24,6 +24,11 @@ const ASSET = /\.(png|jpe?g|gif|webp|svg|css|js)$/;
 const FREE_MAIL =
   /^(gmail|googlemail|yahoo|ymail|hotmail|outlook|live|msn|icloud|me|mac|aol|gmx|mail|yandex|ya|proton|protonmail|qq|163|126|naver|hanmail|daum)\.[a-z.]+$/;
 
+/** Бесплатный почтовый домен (gmail, outlook, qq…): по нему не понять, чья это компания. */
+export function isFreeMailDomain(domain: string): boolean {
+  return FREE_MAIL.test(domain.toLowerCase());
+}
+
 // Чем ближе адрес к тому, кто решает о закупке трафика, тем выше.
 const ROLES: Array<[RegExp, number]> = [
   [/(^|[._-])(partners?|partnerships?|bd|biz|business|marketing|ads|advertising|ua|growth|media|pr|press|publishing|hello|hi)([._-]|$)/, 3],
