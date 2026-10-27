@@ -65,17 +65,18 @@ app.use((req, res, next) => {
   res.status(403).send('запрос не со страницы дашборда');
 });
 
-/** Фильтр из query: view=target|maybe|skip (по умолчанию целевые + под вопросом), with=email. */
+/** Фильтр из query: view=target|maybe|skip (по умолчанию целевые + под вопросом), with=email, li=1. */
 function filterFrom(req: Request): Required<LeadFilter> {
   const v = String(req.query.view ?? '');
   const view: LeadView = v === 'target' || v === 'maybe' || v === 'skip' ? v : 'active';
-  return { view, withEmail: req.query.with === 'email' };
+  return { view, withEmail: req.query.with === 'email', withLinkedIn: req.query.li === '1' };
 }
 
-function query({ view, withEmail }: Required<LeadFilter>): string {
+function query({ view, withEmail, withLinkedIn }: Required<LeadFilter>): string {
   const params = new URLSearchParams();
   if (view !== 'active') params.set('view', view);
   if (withEmail) params.set('with', 'email');
+  if (withLinkedIn) params.set('li', '1');
   const q = params.toString();
   return q ? `?${q}` : '';
 }
@@ -156,7 +157,6 @@ app.get('/', wrap(async (req, res) => {
            <div class="src">${esc(SOURCE_LABEL[r.email_source] ?? r.email_source)}${r.email_personal ? ' · <span class="warn">личный ящик</span>' : ''}</div>`
         : `<span class="mut">${r.contacts_checked_at ? 'почта не найдена' : 'ещё не проверяли'}</span>`;
       const links = [
-        r.linkedin_url ? `<b>${link(r.linkedin_url, r.linkedin_kind === 'person' ? 'LinkedIn (профиль)' : 'LinkedIn')}</b>` : '',
         link(r.website, 'сайт'),
         link(r.support_url, 'поддержка'),
         link(r.play_url, 'Google Play'),
@@ -165,12 +165,16 @@ app.get('/', wrap(async (req, res) => {
         .join(' · ');
       const li = linkedinSearchLinks(r.developer, brandHints(r));
       const people = (r.linkedin_people ?? []) as Array<{ name: string; title: string | null; url: string }>;
-      const peopleHtml = people.length
-        ? `<div class="small people">${people
-            .map((p) => `${link(p.url, esc(p.name))}${p.title ? ` <span class="mut">— ${esc(p.title)}</span>` : ''}`)
-            .join('<br>')}</div>`
+      const company = r.linkedin_url
+        ? `<div><b>${link(r.linkedin_url, r.linkedin_kind === 'person' ? 'Профиль разработчика' : 'Страница компании')}</b></div>`
         : '';
-      const liSearch = `${peopleHtml}<div class="small mut">найти в LinkedIn: ${link(li.company, 'компания')} · ${link(li.google, 'компания через Google')} · ${link(li.people, 'люди: CEO, маркетинг')}</div>`;
+      const peopleHtml = people.length
+        ? `<div class="people">${people
+            .map((p) => `${link(p.url, esc(p.name))}${p.title ? `<div class="small mut">${esc(p.title)}</div>` : ''}`)
+            .join('')}</div>`
+        : '';
+      const found = company || peopleHtml ? `${company}${peopleHtml}` : '<span class="mut">не найдено</span>';
+      const linkedinCell = `${found}<div class="small mut search">искать: ${link(li.company, 'компания')} · ${link(li.google, 'через Google')} · ${link(li.people, 'люди')}</div>`;
       const publisher =
         r.publisher_apps !== null && r.publisher_apps !== undefined
           ? `издатель: ${fmt(r.publisher_apps)} прил. · ${fmt(r.publisher_ratings)} отзывов`
@@ -181,11 +185,12 @@ app.get('/', wrap(async (req, res) => {
           ${r.tier_reason ? `<div class="mut small">${esc(r.tier_reason)}</div>` : ''}</td>
         <td><b>${link(r.app_store_url, esc(r.name)) || esc(r.name)}</b>
           <div class="dev">${esc(r.developer)}</div>
+          <div class="mut small">${esc(r.vertical ?? r.primary_genre)}</div>
           <div class="mut small">${esc(publisher)}</div></td>
-        <td>${esc(r.vertical ?? r.primary_genre)}</td>
         <td>${esc(r.best_placement)}<div class="mut small">в топах ${esc(r.country_count)} стран</div></td>
         <td class="num">${fmt(r.rating_count)}</td>
-        <td class="contact">${contact}${links ? `<div class="small">${links}</div>` : ''}${liSearch}</td>
+        <td class="contact">${contact}${links ? `<div class="small">${links}</div>` : ''}</td>
+        <td class="linkedin">${linkedinCell}</td>
         <td>${esc(r.pitch_hook)}</td>
       </tr>`;
     })
@@ -203,7 +208,7 @@ app.get('/', wrap(async (req, res) => {
       run: currentRun(),
       body: `
   <h1>Лиды</h1>
-  <p class="sub">Целевых: ${stats.target} (с почтой ${stats.target_with_email}) · под вопросом: ${stats.maybe} · мимо: ${stats.skip} (скрыты)${stats.unscored ? ` · без уровня: ${stats.unscored}` : ''}${stats.unchecked ? ` · контакты не проверены: ${stats.unchecked}` : ''}</p>
+  <p class="sub">Целевых: ${stats.target} (с почтой ${stats.target_with_email}, с LinkedIn ${stats.target_with_linkedin}, из них с людьми ${stats.target_with_people}) · под вопросом: ${stats.maybe} · мимо: ${stats.skip} (скрыты)${stats.unscored ? ` · без уровня: ${stats.unscored}` : ''}${stats.unchecked ? ` · контакты не проверены: ${stats.unchecked}` : ''}</p>
   <div class="bar">
     ${viewTab('active', 'Целевые и под вопросом')}
     ${viewTab('target', 'Только целевые')}
@@ -211,17 +216,23 @@ app.get('/', wrap(async (req, res) => {
     ${viewTab('skip', 'Мимо')}
     <span class="sep"></span>
     ${tab(filter.withEmail, query({ ...filter, withEmail: !filter.withEmail }), 'Только с почтой')}
+    ${tab(filter.withLinkedIn, query({ ...filter, withLinkedIn: !filter.withLinkedIn }), 'Только с LinkedIn')}
     <a class="tab csv" href="/api/leads.csv${query(filter)}">Скачать CSV</a>
   </div>
   <div class="wrap"><table class="leads">
-    <thead><tr><th>Уровень</th><th>Приложение</th><th>Вертикаль</th><th>Где в топе</th><th>Отзывы</th><th>Контакт</th><th>Зацепка</th></tr></thead>
-    <tbody>${tr || '<tr><td colspan="7" style="text-align:center;color:var(--mut);padding:40px">Пусто — выбери, <a href="/settings">что парсить</a>, и запусти сбор</td></tr>'}</tbody>
+    <thead><tr><th>Уровень</th><th>Приложение</th><th>Где в топе</th><th>Отзывы</th><th>Почта и сайт</th><th>LinkedIn</th><th>Зацепка</th></tr></thead>
+    <tbody>${tr || `<tr><td colspan="7" style="text-align:center;color:var(--mut);padding:40px">${
+      filter.withEmail || filter.withLinkedIn || filter.view !== 'active'
+        ? 'Нет лидов под этот фильтр'
+        : 'Пусто — выбери, <a href="/settings">что парсить</a>, и запусти сбор'
+    }</td></tr>`}</tbody>
   </table></div>`,
       css: `
   table.leads{min-width:960px}
   .fit{font-weight:700;color:var(--acc);font-size:16px} .num{text-align:right;font-variant-numeric:tabular-nums}
   .dev{color:var(--mut);font-size:12px} .src{font-size:12px;color:var(--mut)}
-  .mail{font-weight:600;overflow-wrap:anywhere} td.contact{min-width:240px} td.fit-cell{min-width:110px}
+  .mail{font-weight:600;overflow-wrap:anywhere} td.contact{min-width:220px} td.fit-cell{min-width:110px}
+  td.linkedin{min-width:220px} td.linkedin .search{margin-top:6px}
   .tier{display:inline-block;margin-top:4px;padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid var(--line)}
   .t-target{color:#4cc38a;border-color:#2b6b4d} .t-maybe{color:var(--warn);border-color:#6b5428} .t-skip{color:var(--mut)}
   .people{margin-top:4px;line-height:1.5}`,

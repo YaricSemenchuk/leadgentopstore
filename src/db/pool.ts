@@ -252,14 +252,19 @@ export async function saveLinkedInSearch(
 export interface LeadFilter {
   view?: LeadView;
   withEmail?: boolean;
+  withLinkedIn?: boolean;
 }
+
+// Есть что-то из LinkedIn: страница компании или найденные люди.
+const HAS_LINKEDIN = `(linkedin_url IS NOT NULL OR jsonb_array_length(COALESCE(linkedin_people, '[]'::jsonb)) > 0)`;
 
 // Строки до появления уровней (tier IS NULL) считаем «под вопросом», пока их не переоценят.
 const TIER_SQL = `COALESCE(tier, CASE WHEN needs_ua THEN 'maybe' ELSE 'skip' END)`;
 
-export async function topLeads(limit = 100, { view = 'active', withEmail = false }: LeadFilter = {}) {
+export async function topLeads(limit = 100, { view = 'active', withEmail = false, withLinkedIn = false }: LeadFilter = {}) {
   const where = [view === 'active' ? `${TIER_SQL} IN ('target','maybe')` : `${TIER_SQL} = $2`];
   if (withEmail) where.push('email IS NOT NULL');
+  if (withLinkedIn) where.push(HAS_LINKEDIN);
   const { rows } = await pool.query(
     `SELECT track_id, name, developer, vertical, primary_genre, app_store_url, best_placement,
             country_count, countries, best_rank, in_grossing, rating_count,
@@ -282,6 +287,9 @@ export async function leadStats() {
   const { rows } = await pool.query(
     `SELECT count(*) FILTER (WHERE ${TIER_SQL} = 'target')::int AS target,
             count(*) FILTER (WHERE ${TIER_SQL} = 'target' AND email IS NOT NULL)::int AS target_with_email,
+            count(*) FILTER (WHERE ${TIER_SQL} = 'target' AND ${HAS_LINKEDIN})::int AS target_with_linkedin,
+            count(*) FILTER (WHERE ${TIER_SQL} = 'target'
+              AND jsonb_array_length(COALESCE(linkedin_people, '[]'::jsonb)) > 0)::int AS target_with_people,
             count(*) FILTER (WHERE ${TIER_SQL} = 'maybe')::int AS maybe,
             count(*) FILTER (WHERE ${TIER_SQL} = 'skip')::int AS skip,
             count(*) FILTER (WHERE tier IS NULL)::int AS unscored,
@@ -289,6 +297,7 @@ export async function leadStats() {
      FROM leads`,
   );
   return rows[0] as {
-    target: number; target_with_email: number; maybe: number; skip: number; unscored: number; unchecked: number;
+    target: number; target_with_email: number; target_with_linkedin: number; target_with_people: number;
+    maybe: number; skip: number; unscored: number; unchecked: number;
   };
 }
