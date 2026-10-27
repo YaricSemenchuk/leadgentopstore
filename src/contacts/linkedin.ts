@@ -78,12 +78,16 @@ export function companyName(developer: string): string {
 
 const COMPANY_HINT = /\b(ltd|limited|llc|inc|corp|gmbh|pte|co\.|company|studio|studios|games?|labs?|technolog|tech|software|media|digital|apps?|interactive|entertainment|network|group|sirketi|ltda|s\.r\.o|sp\. z o\.o|ug|oy|ab|srl|sas|kft|pty|plc|fz|ou)\b/i;
 
-/** Похоже на имя частного лица: 2–3 слова без признаков компании («Luong Vuong», «Antoine Munch»). */
+// Частицы в именах: «Anderson Mateus de Lima», «Jan van der Berg», «Ahmad bin Ali».
+const NAME_PARTICLE = /^(de|da|do|dos|das|del|della|di|van|von|der|den|ter|la|le|du|bin|binti|ibn|al|el|y|e)$/i;
+
+/** Похоже на имя частного лица: 2–3 слова без признаков компании («Luong Vuong»), с частицами — до 5. */
 export function looksLikePerson(developer: string): boolean {
   const d = developer.trim();
   if (COMPANY_HINT.test(d) || /\d/.test(d)) return false;
   const words = d.split(/\s+/);
-  return words.length >= 2 && words.length <= 3;
+  const particles = words.filter((w) => NAME_PARTICLE.test(w)).length;
+  return words.length >= 2 && words.length - particles <= 3 && words.length <= 5;
 }
 
 // Хостинги и платформы: их домен — не бренд разработчика.
@@ -159,7 +163,9 @@ export function knownDomains(h: BrandHints): string[] {
     try {
       const host = new URL(u).hostname;
       const label = host.replace(/^www\./, '').split('.')[0];
-      if (!GENERIC_HOSTS.has(label)) out.add(baseDomain(host));
+      // «playchamp.zohodesk.com» — поддомен платформы: домен zohodesk.com не разработчика
+      const baseLabel = baseDomain(host).split('.')[0];
+      if (!GENERIC_HOSTS.has(label) && !GENERIC_HOSTS.has(baseLabel)) out.add(baseDomain(host));
     } catch {
       /* битый URL */
     }

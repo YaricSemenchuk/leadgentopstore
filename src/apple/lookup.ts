@@ -106,6 +106,8 @@ export async function lookupWithFallback(
 export interface PublisherStats {
   apps: number;
   totalRatings: number;
+  /** все приложения издателя в App Store (Apple отдаёт до ~200) */
+  list: Array<{ id: string; name: string; ratings: number }>;
 }
 
 const ARTIST_CHUNK = 20;
@@ -139,9 +141,10 @@ export async function lookupPublishers(
         }
         for (const r of data.results ?? []) {
           if (r.wrapperType !== 'software' || !r.artistId) continue;
-          const s = out.get(r.artistId) ?? { apps: 0, totalRatings: 0 };
+          const s = out.get(r.artistId) ?? { apps: 0, totalRatings: 0, list: [] };
           s.apps++;
           s.totalRatings += r.userRatingCount ?? 0;
+          s.list.push({ id: String(r.trackId), name: String(r.trackName ?? ''), ratings: r.userRatingCount ?? 0 });
           out.set(r.artistId, s);
         }
       }),

@@ -38,6 +38,9 @@ test('частное лицо распознаётся, компания — н�
   assert.equal(looksLikePerson('Antoine Munch'), true);
   assert.equal(looksLikePerson('Fuse Entertainment INC'), false);
   assert.equal(looksLikePerson('5minlab'), false);
+  assert.equal(looksLikePerson('Anderson Mateus de Lima'), true);
+  assert.equal(looksLikePerson('Jan van der Berg'), true);
+  assert.equal(looksLikePerson('Finger Rush Limited'), false);
 });
 
 test('бренд берётся из домена сайта, платформы — нет', () => {

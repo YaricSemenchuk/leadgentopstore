@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { baseDomain, extractEmails, firstMailto, rankEmails } from './emails.js';
+import { baseDomain, buildCompanyEmails, classifyEmail, extractEmails, firstMailto, type EmailContext, type FoundEmail } from './emails.js';
 
 // Фикстуры повторяют реальные случаи со страниц разработчиков (октябрь 2026).
 
@@ -34,48 +34,130 @@ test('baseDomain снимает поддомены и понимает co.kr', (
   assert.equal(baseDomain('www.nexon.co.kr'), 'nexon.co.kr');
 });
 
+const ctx = (over: Partial<EmailContext> = {}): EmailContext => ({ company: null, domains: [], people: [], individual: false, ...over });
+const build = (found: FoundEmail[], over: Partial<EmailContext> = {}) => buildCompanyEmails(found, ctx(over));
+
+test('маскировка «name [at] domain [dot] com» распознаётся', () => {
+  assert.deepEqual(extractEmails('<body>Write to anna [at] studio [dot] io</body>'), ['anna@studio.io']);
+});
+
 test('юрфирма, GDPR-представитель и регулятор из политики отсекаются', () => {
-  const r = rankEmails(
+  const r = build(
     [
       { email: 'ady.vannieuwenhuizen@fieldfisher.com', source: 'privacy_policy' },
       { email: 'rep_deepseek@prighter.com', source: 'privacy_policy' },
-      { email: 'dpo@centurygame.com', source: 'privacy_policy' },
+      { email: 'casework@ico.org.uk', source: 'privacy_policy' },
     ],
-    ['https://www.centurygames.com/'],
+    { domains: ['centurygames.com'] },
   );
   assert.equal(r.best, null);
+  assert.deepEqual(r.emails, []);
 });
 
-test('почта из Google Play важнее адресов со страниц', () => {
-  const r = rankEmails(
+test('личный адрес и общий ящик: имя — личный, роль или бренд — общий', () => {
+  const c = { company: 'Fuse Entertainment INC', domains: ['fusegames.io'], individual: false };
+  assert.equal(classifyEmail('deniz@fusegames.io', c), 'personal');
+  assert.equal(classifyEmail('ann.lee@fusegames.io', c), 'personal');
+  assert.equal(classifyEmail('ceo@fusegames.io', c), 'personal');
+  assert.equal(classifyEmail('support@fusegames.io', c), 'role');
+  assert.equal(classifyEmail('fusedelaware@fusegames.io', c), 'role');
+  assert.equal(classifyEmail('developergame@dragonvalegames.com', c), 'role');
+  assert.equal(classifyEmail('fingerrush.customerservice@outlook.com', c), 'role');
+  assert.equal(classifyEmail('244contato@gmail.com', c), 'role');
+  // «mail» внутри имени — не роль
+  assert.equal(classifyEmail('ismail@fusegames.io', c), 'personal');
+});
+
+test('личный адрес идёт первым, затем партнёрский ящик, поддержка, юридический', () => {
+  const r = build(
     [
-      { email: 'hello@studio.io', source: 'website' },
+      { email: 'support@fusegames.io', source: 'google_play' },
+      { email: 'privacy@fusegames.io', source: 'privacy_policy' },
+      { email: 'partners@fusegames.io', source: 'website' },
+      { email: 'deniz@fusegames.io', source: 'play_developer' },
+    ],
+    { company: 'Fuse Entertainment INC', domains: ['fusegames.io'] },
+  );
+  assert.deepEqual(r.emails.map((e) => e.email), ['deniz@fusegames.io', 'partners@fusegames.io', 'support@fusegames.io', 'privacy@fusegames.io']);
+  assert.equal(r.best?.kind, 'personal');
+});
+
+test('одинаковый адрес из разных источников — одна запись со всеми источниками', () => {
+  const r = build(
+    [
+      { email: 'info@lava.gs', source: 'app_store_trader' },
+      { email: 'info@lava.gs', source: 'google_play' },
+      { email: 'info@lava.gs', source: 'website' },
+    ],
+    { domains: ['lava.gs'] },
+  );
+  assert.equal(r.emails.length, 1);
+  assert.deepEqual(r.emails[0].sources, ['app_store_trader', 'google_play', 'website']);
+});
+
+test('домен адреса из стора считается доменом разработчика: адрес с сайта на нём берётся', () => {
+  const r = build(
+    [
       { email: 'support@studio.io', source: 'google_play' },
+      { email: 'maria@studio.io', source: 'website' },
     ],
-    ['https://studio.io'],
+    { domains: ['studio-games.com'] },
   );
-  assert.equal(r.best?.email, 'support@studio.io');
-  assert.deepEqual(r.others, ['hello@studio.io']);
+  assert.ok(r.emails.some((e) => e.email === 'maria@studio.io' && e.kind === 'personal'));
 });
 
-test('обычный адрес на домене разработчика лучше privacy@', () => {
-  const r = rankEmails(
+test('адрес привязывается к человеку из LinkedIn, по шаблону составляются адреса остальных', () => {
+  const r = build(
     [
-      { email: 'privacy@amo.co', source: 'support_page' },
-      { email: 'love@amo.co', source: 'support_page' },
+      { email: 'emre.kaya@fusegames.io', source: 'website' },
+      { email: 'support@fusegames.io', source: 'google_play' },
     ],
-    ['https://www.amo.co/privacy-policy/'],
+    {
+      company: 'Fuse Entertainment INC',
+      domains: ['fusegames.io'],
+      people: [
+        { name: 'Emre Kaya', title: 'Co-Founder' },
+        { name: 'Şule Yıldız', title: 'Head of Marketing' },
+        { name: 'Li', title: 'CEO' },
+      ],
+    },
   );
-  assert.equal(r.best?.email, 'love@amo.co');
+  const emre = r.emails.find((e) => e.email === 'emre.kaya@fusegames.io');
+  assert.equal(emre?.person, 'Emre Kaya');
+  assert.deepEqual(r.pattern, { pattern: '{first}.{last}', domain: 'fusegames.io' });
+  const guess = r.emails.find((e) => e.guessed);
+  assert.equal(guess?.email, 'sule.yildiz@fusegames.io');
+  assert.equal(guess?.person, 'Şule Yıldız');
+  // угаданный адрес не бывает лучшим
+  assert.equal(r.best?.email, 'emre.kaya@fusegames.io');
 });
 
-test('бесплатный ящик помечается как личный', () => {
-  const r = rankEmails([{ email: 'indie.dev@gmail.com', source: 'google_play' }], []);
+test('без подтверждённого шаблона адреса не угадываются', () => {
+  const r = build([{ email: 'deniz@fusegames.io', source: 'play_developer' }], {
+    domains: ['fusegames.io'],
+    people: [{ name: 'Ann Lee', title: 'CEO' }],
+  });
+  assert.equal(r.pattern, null);
+  assert.equal(r.emails.filter((e) => e.guessed).length, 0);
+});
+
+test('gmail частного разработчика из стора — личный и лучший', () => {
+  const r = build([{ email: 'indie.dev@gmail.com', source: 'google_play' }], { individual: true });
   assert.equal(r.best?.email, 'indie.dev@gmail.com');
-  assert.equal(r.personal, true);
+  assert.equal(r.best?.kind, 'personal');
+  assert.equal(r.best?.free, true);
 });
 
 test('личный gmail со сторонней страницы без роли не берётся', () => {
-  const r = rankEmails([{ email: 'globallaas@gmail.com', source: 'privacy_policy' }], ['https://37games.com']);
+  const r = build([{ email: 'globallaas@gmail.com', source: 'privacy_policy' }], { domains: ['37games.com'] });
   assert.equal(r.best, null);
+});
+
+test('ящики команды и отдела — общие, даже без слова support', () => {
+  const c = { company: 'EVISTA PTE. LTD.', domains: ['yg.ltd'], individual: false };
+  for (const e of ['devteam@yg.ltd', 'engineering@venice.ai', 'labs@pawnese.com', 'evitechnology2022@gmail.com', 'supoprt@gryphon.games']) {
+    assert.equal(classifyEmail(e, c), 'role', e);
+  }
+  assert.equal(classifyEmail('robert.vigafun95@gmail.com', c), 'personal');
+  assert.equal(classifyEmail('huanqing.liu@dongzhougame.com', c), 'personal');
 });

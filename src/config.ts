@@ -132,6 +132,12 @@ export const config = {
     apiKey: (process.env.SERPER_API_KEY ?? '').trim(),
     maxPerRun: num(process.env.LINKEDIN_SEARCH_MAX_PER_RUN, 300),
   },
+  // Hunter.io Domain Search: личная почта сотрудников, шаблон почты домена, размер компании; без ключа выключен
+  hunter: {
+    apiKey: (process.env.HUNTER_API_KEY ?? '').trim(),
+    // бесплатный план — 25 запросов в месяц
+    maxPerRun: num(process.env.HUNTER_MAX_PER_RUN, 25),
+  },
 
   llm: {
     provider: (process.env.LLM_PROVIDER ?? 'anthropic') as 'anthropic' | 'groq',

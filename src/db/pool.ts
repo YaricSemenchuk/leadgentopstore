@@ -5,8 +5,6 @@ import { dirname, join } from 'node:path';
 import { config } from '../config.js';
 import type { Candidate } from '../pipeline/aggregate.js';
 import type { Lead } from '../llm/qualify.js';
-import { CONTACTS_VERSION, type Contacts } from '../contacts/enrich.js';
-import { LINKEDIN_SEARCH_VERSION } from '../contacts/people-search.js';
 import type { Tier } from '../pipeline/tier.js';
 
 export const pool = new pg.Pool({ connectionString: config.databaseUrl });
@@ -56,6 +54,23 @@ export async function upsertLead(c: Candidate, lead: Lead): Promise<void> {
        qualified_at=now(), last_seen=now()`,
     [...signalParams(c), ...qualificationParams(lead)],
   );
+  await ensureCompany(c);
+}
+
+/**
+ * Компания разработчика для лида: создаётся по id разработчика в App Store, лид привязывается к ней.
+ * Размер портфеля обновляется, если его только что посчитали.
+ */
+export async function ensureCompany(c: Candidate): Promise<void> {
+  if (!c.artistId) return;
+  const { rows } = await pool.query(
+    `INSERT INTO companies (artist_id, name, ios_apps, ios_ratings) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (artist_id) DO UPDATE SET name = $2,
+       ios_apps = COALESCE($3, companies.ios_apps), ios_ratings = COALESCE($4, companies.ios_ratings)
+     RETURNING id`,
+    [c.artistId, c.developer, c.publisher?.apps ?? null, c.publisher?.totalRatings ?? null],
+  );
+  await pool.query(`UPDATE leads SET company_id = $2 WHERE track_id = $1 AND company_id IS DISTINCT FROM $2`, [c.trackId, rows[0].id]);
 }
 
 function qualificationParams(lead: Lead) {
@@ -103,7 +118,7 @@ export async function leadsForRescore(onlyUnscored: boolean): Promise<Candidate[
       ratingCount: r.rating_count ?? undefined,
       publisher:
         r.publisher_apps !== null
-          ? { apps: r.publisher_apps, totalRatings: Number(r.publisher_ratings ?? 0) }
+          ? { apps: r.publisher_apps, totalRatings: Number(r.publisher_ratings ?? 0), list: [] }
           : undefined,
     } satisfies Candidate;
   });
@@ -122,6 +137,7 @@ export async function refreshSignals(c: Candidate): Promise<void> {
      WHERE track_id=$1`,
     signalParams(c),
   );
+  await ensureCompany(c);
 }
 
 /** Снимает пометку needs_ua с лидов издателей из списка исключений (подстрока, без регистра). */
@@ -148,106 +164,8 @@ export async function recentlyQualified(trackIds: string[], days: number): Promi
   return new Set(rows.map((r) => r.track_id as string));
 }
 
-export interface ContactTarget {
-  trackId: string;
-  name: string;
-  bundleId: string | null;
-  sellerUrl: string | null;
-  country: string;
-}
-
-/**
- * Лиды, которым нужны контакты: подходят (needs_ua) и не проверялись recheckDays дней
- * или проверялись старой версией сбора (например, ещё без LinkedIn).
- */
-export async function leadsNeedingContacts(recheckDays: number): Promise<ContactTarget[]> {
-  const { rows } = await pool.query(
-    `SELECT track_id, name, bundle_id, seller_url,
-            CASE WHEN 'us' = ANY(countries) THEN 'us' ELSE countries[1] END AS country
-     FROM leads
-     WHERE needs_ua = true
-       AND (contacts_checked_at IS NULL OR contacts_checked_at < now() - make_interval(days => $1)
-            OR COALESCE(contacts_version, 1) < $2)
-     ORDER BY fit_score DESC NULLS LAST`,
-    [recheckDays, CONTACTS_VERSION],
-  );
-  return rows.map((r) => ({
-    trackId: r.track_id,
-    name: r.name,
-    bundleId: r.bundle_id,
-    sellerUrl: r.seller_url,
-    country: r.country ?? 'us',
-  }));
-}
-
-export async function saveContacts(trackId: string, c: Contacts): Promise<void> {
-  await pool.query(
-    `UPDATE leads SET
-       website=$2, support_url=$3, privacy_url=$4, play_url=$5,
-       email=$6, email_source=$7, emails=$8, email_personal=$9,
-       -- ссылка с сайта важнее; если на сайте нет — оставляем найденную поиском
-       linkedin_url = CASE WHEN $10::text IS NOT NULL THEN $10 WHEN linkedin_source = 'search' THEN linkedin_url END,
-       linkedin_kind = CASE WHEN $10::text IS NOT NULL THEN $11 WHEN linkedin_source = 'search' THEN linkedin_kind END,
-       linkedin_source = CASE WHEN $10::text IS NOT NULL THEN 'site' WHEN linkedin_source = 'search' THEN 'search' END,
-       contacts_version=$12, contacts_checked_at=now()
-     WHERE track_id=$1`,
-    [
-      trackId, c.website, c.supportUrl, c.privacyUrl, c.playUrl, c.email, c.emailSource, c.emails, c.emailPersonal,
-      c.linkedinUrl, c.linkedinKind, CONTACTS_VERSION,
-    ],
-  );
-}
-
 /** Вид таблицы: active — целевые и под вопросом (целевые первыми), либо один уровень. */
 export type LeadView = 'active' | Tier;
-
-export interface LinkedInSearchTarget {
-  trackId: string;
-  name: string;
-  developer: string;
-  website: string | null;
-  email: string | null;
-  supportUrl: string | null;
-  privacyUrl: string | null;
-}
-
-/**
- * Целевые лиды для автопоиска LinkedIn — лучшие первыми: где ещё не искали, и где старые
- * правила что-то нашли (их перепроверяем; где не нашли — новые, более строгие, тоже не найдут).
- */
-export async function leadsNeedingLinkedInSearch(limit: number): Promise<LinkedInSearchTarget[]> {
-  const { rows } = await pool.query(
-    `SELECT track_id, name, developer, COALESCE(website, seller_url) AS website, email, support_url, privacy_url
-     FROM leads
-     WHERE tier = 'target'
-       AND (linkedin_searched_at IS NULL
-            OR (COALESCE(linkedin_search_version, 1) < $2
-                AND (jsonb_array_length(COALESCE(linkedin_people, '[]'::jsonb)) > 0 OR linkedin_source = 'search')))
-     ORDER BY fit_score DESC NULLS LAST, (email IS NOT NULL) DESC
-     LIMIT $1`,
-    [limit, LINKEDIN_SEARCH_VERSION],
-  );
-  return rows.map((r) => ({
-    trackId: r.track_id, name: r.name, developer: r.developer, website: r.website,
-    email: r.email, supportUrl: r.support_url, privacyUrl: r.privacy_url,
-  }));
-}
-
-export async function saveLinkedInSearch(
-  trackId: string,
-  found: { companyUrl: string | null; people: Array<{ name: string; title: string | null; url: string }> },
-): Promise<void> {
-  await pool.query(
-    `UPDATE leads SET
-       linkedin_people = $2, linkedin_searched_at = now(), linkedin_search_version = $4,
-       -- ссылка с сайта разработчика не трогается; найденная поиском заменяется новым результатом
-       linkedin_url = CASE WHEN linkedin_source = 'site' THEN linkedin_url ELSE $3 END,
-       linkedin_kind = CASE WHEN linkedin_source = 'site' THEN linkedin_kind WHEN $3::text IS NOT NULL THEN 'company' END,
-       linkedin_source = CASE WHEN linkedin_source = 'site' THEN 'site' WHEN $3::text IS NOT NULL THEN 'search' END
-     WHERE track_id = $1`,
-    [trackId, JSON.stringify(found.people), found.companyUrl, LINKEDIN_SEARCH_VERSION],
-  );
-}
 
 export interface LeadFilter {
   view?: LeadView;
@@ -255,49 +173,39 @@ export interface LeadFilter {
   withLinkedIn?: boolean;
 }
 
-// Есть что-то из LinkedIn: страница компании или найденные люди.
-const HAS_LINKEDIN = `(linkedin_url IS NOT NULL OR jsonb_array_length(COALESCE(linkedin_people, '[]'::jsonb)) > 0)`;
-
 // Строки до появления уровней (tier IS NULL) считаем «под вопросом», пока их не переоценят.
-const TIER_SQL = `COALESCE(tier, CASE WHEN needs_ua THEN 'maybe' ELSE 'skip' END)`;
+export const TIER_SQL = `COALESCE(l.tier, CASE WHEN l.needs_ua THEN 'maybe' ELSE 'skip' END)`;
 
+// Контакты — у компании; старые поля лида остаются запасным вариантом, пока компанию не проверили.
+const LEAD_EMAIL = `COALESCE(c.email, l.email)`;
+const LEAD_HAS_LINKEDIN = `(COALESCE(c.linkedin_url, l.linkedin_url) IS NOT NULL
+  OR jsonb_array_length(COALESCE(c.linkedin_people, l.linkedin_people, '[]'::jsonb)) > 0)`;
+
+/** Приложения (вид «Приложения»): одна строка — одно приложение, контакты — его компании. */
 export async function topLeads(limit = 100, { view = 'active', withEmail = false, withLinkedIn = false }: LeadFilter = {}) {
   const where = [view === 'active' ? `${TIER_SQL} IN ('target','maybe')` : `${TIER_SQL} = $2`];
-  if (withEmail) where.push('email IS NOT NULL');
-  if (withLinkedIn) where.push(HAS_LINKEDIN);
+  if (withEmail) where.push(`${LEAD_EMAIL} IS NOT NULL`);
+  if (withLinkedIn) where.push(LEAD_HAS_LINKEDIN);
   const { rows } = await pool.query(
-    `SELECT track_id, name, developer, vertical, primary_genre, app_store_url, best_placement,
-            country_count, countries, best_rank, in_grossing, rating_count,
-            publisher_apps, publisher_ratings,
-            ${TIER_SQL} AS tier, tier_reason, fit_score, pitch_hook, reasons,
-            email, email_source, emails, email_personal, linkedin_url, linkedin_kind, linkedin_people, linkedin_source,
-            COALESCE(website, seller_url) AS website, support_url, privacy_url, play_url,
-            contacts_checked_at, qualified_at, last_seen
-     FROM leads
+    `SELECT l.track_id, l.name, l.developer, l.vertical, l.primary_genre, l.app_store_url, l.best_placement,
+            l.country_count, l.countries, l.best_rank, l.in_grossing, l.rating_count,
+            l.publisher_apps, l.publisher_ratings,
+            ${TIER_SQL} AS tier, l.tier_reason, l.fit_score, l.pitch_hook, l.reasons,
+            ${LEAD_EMAIL} AS email, l.email_source, COALESCE(c.emails, '[]'::jsonb) AS company_emails,
+            l.emails AS legacy_emails, l.email_personal,
+            COALESCE(c.linkedin_url, l.linkedin_url) AS linkedin_url,
+            CASE WHEN c.linkedin_url IS NOT NULL THEN 'company' ELSE l.linkedin_kind END AS linkedin_kind,
+            COALESCE(c.linkedin_people, l.linkedin_people) AS linkedin_people,
+            COALESCE(c.website, l.website, l.seller_url) AS website, COALESCE(c.support_url, l.support_url) AS support_url,
+            COALESCE(c.privacy_url, l.privacy_url) AS privacy_url, l.play_url,
+            c.id AS company_id, c.name AS company_name, c.employees, c.kind AS company_kind, c.personal_emails,
+            COALESCE(c.checked_at, l.contacts_checked_at) AS contacts_checked_at, l.qualified_at, l.last_seen
+     FROM leads l LEFT JOIN companies c ON c.id = l.company_id
      WHERE ${where.join(' AND ')}
      ORDER BY CASE ${TIER_SQL} WHEN 'target' THEN 0 WHEN 'maybe' THEN 1 ELSE 2 END,
-              fit_score DESC NULLS LAST, (email IS NOT NULL) DESC, country_count DESC
+              l.fit_score DESC NULLS LAST, (${LEAD_EMAIL} IS NOT NULL) DESC, l.country_count DESC
      LIMIT $1`,
     view === 'active' ? [limit] : [limit, view],
   );
   return rows;
-}
-
-export async function leadStats() {
-  const { rows } = await pool.query(
-    `SELECT count(*) FILTER (WHERE ${TIER_SQL} = 'target')::int AS target,
-            count(*) FILTER (WHERE ${TIER_SQL} = 'target' AND email IS NOT NULL)::int AS target_with_email,
-            count(*) FILTER (WHERE ${TIER_SQL} = 'target' AND ${HAS_LINKEDIN})::int AS target_with_linkedin,
-            count(*) FILTER (WHERE ${TIER_SQL} = 'target'
-              AND jsonb_array_length(COALESCE(linkedin_people, '[]'::jsonb)) > 0)::int AS target_with_people,
-            count(*) FILTER (WHERE ${TIER_SQL} = 'maybe')::int AS maybe,
-            count(*) FILTER (WHERE ${TIER_SQL} = 'skip')::int AS skip,
-            count(*) FILTER (WHERE tier IS NULL)::int AS unscored,
-            count(*) FILTER (WHERE needs_ua AND contacts_checked_at IS NULL)::int AS unchecked
-     FROM leads`,
-  );
-  return rows[0] as {
-    target: number; target_with_email: number; target_with_linkedin: number; target_with_people: number;
-    maybe: number; skip: number; unscored: number; unchecked: number;
-  };
 }

@@ -1,7 +1,9 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { timingSafeEqual } from 'node:crypto';
 import { config } from './config.js';
-import { initSchema, leadStats, topLeads, pool, type LeadFilter, type LeadView } from './db/pool.js';
+import { initSchema, topLeads, pool, type LeadFilter, type LeadView } from './db/pool.js';
+import { companyStats, topCompanies } from './db/companies.js';
+import { COMPANY_CSV, companyFilterFrom, renderCompaniesPage, SOURCE_LABEL, TIER_LABEL } from './web/companies-page.js';
 import { currentRun, markInterruptedRuns, recentRuns, startRun } from './jobs/runner.js';
 import { getParseSettings, ParseSettingsSchema, saveParseSettings } from './settings.js';
 import { renderSettingsPage, type Flash } from './web/settings-page.js';
@@ -12,6 +14,7 @@ const app = express();
 
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD ?? '';
 const searchEnabled = !!config.search.apiKey;
+const hunterEnabled = !!config.hunter.apiKey;
 const INGEST_TOKEN = process.env.INGEST_TOKEN ?? '';
 
 function safeEqual(a: string, b: string): boolean {
@@ -81,28 +84,51 @@ function query({ view, withEmail, withLinkedIn }: Required<LeadFilter>): string 
   return q ? `?${q}` : '';
 }
 
-// JSON-список лидов
-app.get('/api/leads', wrap(async (req, res) => {
-  const limit = Math.min(Number(req.query.limit ?? 100) || 100, 1000);
-  res.json(await topLeads(limit, filterFrom(req)));
+// CSV для рассылки. Поля приходят от сторонних разработчиков — экранируем формулы Excel.
+function csvCell(v: unknown): string {
+  let s = v === null || v === undefined ? '' : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\n\r;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function sendCsv(res: Response, name: string, columns: Array<[string, (r: any) => unknown]>, rows: any[]): void {
+  const lines = [columns.map(([h]) => h).join(','), ...rows.map((r) => columns.map(([, f]) => csvCell(f(r))).join(','))];
+  res.type('text/csv; charset=utf-8').attachment(name).send('\ufeff' + lines.join('\r\n'));
+}
+
+// --- Компании: одна строка — компания, её приложения, люди и почта ---
+
+app.get('/', wrap(async (req, res) => {
+  const filter = companyFilterFrom(req.query);
+  const [rows, stats] = await Promise.all([topCompanies(300, filter), companyStats()]);
+  res.type('html').send(renderCompaniesPage({ rows, stats, filter, run: currentRun() }));
 }));
+
+app.get('/api/companies', wrap(async (req, res) => {
+  const limit = Math.min(Number(req.query.limit ?? 100) || 100, 1000);
+  res.json(await topCompanies(limit, companyFilterFrom(req.query)));
+}));
+
+app.get('/api/companies.csv', wrap(async (req, res) => {
+  sendCsv(res, 'companies.csv', COMPANY_CSV, await topCompanies(5000, companyFilterFrom(req.query)));
+}));
+
+// --- Приложения: одна строка — приложение; контакты — его компании ---
 
 const brandHints = (r: any) => ({ website: r.website, email: r.email, supportUrl: r.support_url, privacyUrl: r.privacy_url });
 
-// CSV для рассылки. Поля приходят от сторонних разработчиков — экранируем формулы Excel.
-const CSV_COLUMNS: Array<[string, (r: any) => unknown]> = [
+const LEAD_CSV: Array<[string, (r: any) => unknown]> = [
   ['tier', (r) => r.tier],
   ['tier_reason', (r) => r.tier_reason],
   ['fit_score', (r) => r.fit_score],
   ['app', (r) => r.name],
   ['developer', (r) => r.developer],
+  ['company_employees', (r) => r.employees],
   ['email', (r) => r.email],
-  ['email_source', (r) => r.email_source],
-  ['email_personal', (r) => (r.email_personal ? 'yes' : '')],
-  ['other_emails', (r) => (r.emails ?? []).join(' ')],
+  ['personal_emails', (r) => (r.company_emails ?? []).filter((e: any) => e.kind === 'personal' && !e.guessed).map((e: any) => e.email).join(' ')],
+  ['other_emails', (r) => (r.company_emails ?? []).filter((e: any) => e.kind === 'role' && e.email !== r.email).map((e: any) => e.email).join(' ')],
   ['linkedin', (r) => r.linkedin_url],
   ['linkedin_people', (r) => (r.linkedin_people ?? []).map((p: any) => `${p.name}${p.title ? ` (${p.title})` : ''} ${p.url}`).join(' | ')],
-  ['linkedin_kind', (r) => r.linkedin_kind],
   ['linkedin_company_search', (r) => linkedinSearchLinks(r.developer, brandHints(r)).company],
   ['linkedin_people_search', (r) => linkedinSearchLinks(r.developer, brandHints(r)).people],
   ['website', (r) => r.website],
@@ -119,31 +145,18 @@ const CSV_COLUMNS: Array<[string, (r: any) => unknown]> = [
   ['reasons', (r) => (r.reasons ?? []).join(' | ')],
 ];
 
-function csvCell(v: unknown): string {
-  let s = v === null || v === undefined ? '' : String(v);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
-  return /[",\n\r;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
-app.get('/api/leads.csv', wrap(async (req, res) => {
-  const rows = await topLeads(5000, filterFrom(req));
-  const lines = [CSV_COLUMNS.map(([h]) => h).join(','), ...rows.map((r) => CSV_COLUMNS.map(([, f]) => csvCell(f(r))).join(','))];
-  res.type('text/csv; charset=utf-8').attachment('leads.csv').send('﻿' + lines.join('\r\n'));
+app.get('/api/leads', wrap(async (req, res) => {
+  const limit = Math.min(Number(req.query.limit ?? 100) || 100, 1000);
+  res.json(await topLeads(limit, filterFrom(req)));
 }));
 
-const TIER_LABEL: Record<string, string> = { target: 'целевой', maybe: 'под вопросом', skip: 'мимо' };
+app.get('/api/leads.csv', wrap(async (req, res) => {
+  sendCsv(res, 'leads.csv', LEAD_CSV, await topLeads(5000, filterFrom(req)));
+}));
 
-const SOURCE_LABEL: Record<string, string> = {
-  google_play: 'Google Play',
-  support_page: 'поддержка',
-  privacy_policy: 'политика',
-  website: 'сайт',
-};
-
-// HTML-дашборд
-app.get('/', wrap(async (req, res) => {
+app.get('/apps', wrap(async (req, res) => {
   const filter = filterFrom(req);
-  const [rows, stats] = await Promise.all([topLeads(300, filter), leadStats()]);
+  const [rows, stats] = await Promise.all([topLeads(300, filter), companyStats()]);
 
   const link = (href: unknown, label: string) => {
     const h = safeHref(href);
@@ -152,17 +165,14 @@ app.get('/', wrap(async (req, res) => {
 
   const tr = rows
     .map((r) => {
+      const personal = (r.company_emails ?? []).filter((e: any) => e.kind === 'personal' && !e.guessed).length;
+      const best = (r.company_emails ?? []).find((e: any) => e.email === r.email);
       const contact = r.email
         ? `<a class="mail" href="mailto:${esc(r.email)}">${esc(r.email)}</a>
-           <div class="src">${esc(SOURCE_LABEL[r.email_source] ?? r.email_source)}${r.email_personal ? ' · <span class="warn">личный ящик</span>' : ''}</div>`
+           <div class="src">${esc(best ? best.sources.map((x: string) => SOURCE_LABEL[x as keyof typeof SOURCE_LABEL] ?? x).join(', ') : SOURCE_LABEL[r.email_source as keyof typeof SOURCE_LABEL] ?? r.email_source ?? '')}${best?.kind === 'personal' ? ' · <span class="ok">личный</span>' : ''}</div>
+           ${personal ? `<div class="small">личных почт у компании: ${personal}</div>` : ''}`
         : `<span class="mut">${r.contacts_checked_at ? 'почта не найдена' : 'ещё не проверяли'}</span>`;
-      const links = [
-        link(r.website, 'сайт'),
-        link(r.support_url, 'поддержка'),
-        link(r.play_url, 'Google Play'),
-      ]
-        .filter(Boolean)
-        .join(' · ');
+      const links = [link(r.website, 'сайт'), link(r.support_url, 'поддержка'), link(r.play_url, 'Google Play')].filter(Boolean).join(' · ');
       const li = linkedinSearchLinks(r.developer, brandHints(r));
       const people = (r.linkedin_people ?? []) as Array<{ name: string; title: string | null; url: string }>;
       const company = r.linkedin_url
@@ -177,7 +187,7 @@ app.get('/', wrap(async (req, res) => {
       const linkedinCell = `${found}<div class="small mut search">искать: ${link(li.company, 'компания')} · ${link(li.google, 'через Google')} · ${link(li.people, 'люди')}</div>`;
       const publisher =
         r.publisher_apps !== null && r.publisher_apps !== undefined
-          ? `издатель: ${fmt(r.publisher_apps)} прил. · ${fmt(r.publisher_ratings)} отзывов`
+          ? `издатель: ${fmt(r.publisher_apps)} прил. · ${fmt(r.publisher_ratings)} отзывов${r.employees ? ` · ${esc(r.employees)} сотр.` : ''}`
           : '';
       return `<tr>
         <td class="fit-cell"><div class="fit">${esc(r.fit_score)}</div>
@@ -197,18 +207,18 @@ app.get('/', wrap(async (req, res) => {
     .join('');
 
   const tab = (active: boolean, href: string, label: string) =>
-    `<a class="tab${active ? ' on' : ''}" href="/${href}">${label}</a>`;
+    `<a class="tab${active ? ' on' : ''}" href="/apps${href}">${label}</a>`;
   const viewTab = (view: LeadView, label: string) =>
     tab(filter.view === view, query({ ...filter, view }), label);
 
   res.type('html').send(
     page({
-      title: 'Лиды',
-      active: 'leads',
+      title: 'Приложения',
+      active: 'apps',
       run: currentRun(),
       body: `
-  <h1>Лиды</h1>
-  <p class="sub">Целевых: ${stats.target} (с почтой ${stats.target_with_email}, с LinkedIn ${stats.target_with_linkedin}, из них с людьми ${stats.target_with_people}) · под вопросом: ${stats.maybe} · мимо: ${stats.skip} (скрыты)${stats.unscored ? ` · без уровня: ${stats.unscored}` : ''}${stats.unchecked ? ` · контакты не проверены: ${stats.unchecked}` : ''}</p>
+  <h1>Приложения</h1>
+  <p class="sub">Каждое приложение из чартов отдельно; контакты — общие для его компании (см. «Компании»). Целевых приложений: ${stats.target_apps} у ${stats.target} компаний.</p>
   <div class="bar">
     ${viewTab('active', 'Целевые и под вопросом')}
     ${viewTab('target', 'Только целевые')}
@@ -221,11 +231,7 @@ app.get('/', wrap(async (req, res) => {
   </div>
   <div class="wrap"><table class="leads">
     <thead><tr><th>Уровень</th><th>Приложение</th><th>Где в топе</th><th>Отзывы</th><th>Почта и сайт</th><th>LinkedIn</th><th>Зацепка</th></tr></thead>
-    <tbody>${tr || `<tr><td colspan="7" style="text-align:center;color:var(--mut);padding:40px">${
-      filter.withEmail || filter.withLinkedIn || filter.view !== 'active'
-        ? 'Нет лидов под этот фильтр'
-        : 'Пусто — выбери, <a href="/settings">что парсить</a>, и запусти сбор'
-    }</td></tr>`}</tbody>
+    <tbody>${tr || `<tr><td colspan="7" style="text-align:center;color:var(--mut);padding:40px">Нет приложений под этот фильтр</td></tr>`}</tbody>
   </table></div>`,
       css: `
   table.leads{min-width:960px}
@@ -255,7 +261,7 @@ app.get('/settings', wrap(async (req, res) => {
   const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
   let flash = FLASH[String(req.query.ok ?? '')];
   if (req.query.started) flash = { kind: 'ok', text: `Сбор #${Number(req.query.started)} запущен — статус обновляется на этой странице.` };
-  res.type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash, searchEnabled }));
+  res.type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash, searchEnabled, hunterEnabled }));
 }));
 
 app.post('/settings', wrap(async (req, res) => {
@@ -273,7 +279,7 @@ app.post('/settings', wrap(async (req, res) => {
   if (!parsed.success) {
     const text = parsed.error.issues.map((i) => i.message).join('; ');
     const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
-    res.status(400).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, flash: { kind: 'bad', text: `Не сохранено: ${text}` } }));
+    res.status(400).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, hunterEnabled, flash: { kind: 'bad', text: `Не сохранено: ${text}` } }));
     return;
   }
   await saveParseSettings(parsed.data);
@@ -287,7 +293,7 @@ app.post('/settings', wrap(async (req, res) => {
     return;
   }
   const runs = await recentRuns();
-  res.status(409).type('html').send(renderSettingsPage({ settings: parsed.data, run: currentRun(), runs, searchEnabled, flash: { kind: 'bad', text: `Сохранено, но сбор не запущен: ${r.reason}` } }));
+  res.status(409).type('html').send(renderSettingsPage({ settings: parsed.data, run: currentRun(), runs, searchEnabled, hunterEnabled, flash: { kind: 'bad', text: `Сохранено, но сбор не запущен: ${r.reason}` } }));
 }));
 
 app.post('/runs/contacts', wrap(async (_req, res) => {
@@ -297,7 +303,7 @@ app.post('/runs/contacts', wrap(async (_req, res) => {
     return;
   }
   const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
-  res.status(409).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, flash: { kind: 'bad', text: `Не запущено: ${r.reason}` } }));
+  res.status(409).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, hunterEnabled, flash: { kind: 'bad', text: `Не запущено: ${r.reason}` } }));
 }));
 
 app.get('/api/run-status', wrap(async (_req, res) => {

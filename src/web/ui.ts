@@ -41,7 +41,9 @@ const CSS = `
   .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
 `;
 
-export function page(opts: { title: string; active: 'leads' | 'settings'; run: CurrentRun | null; body: string; css?: string }): string {
+export type NavKey = 'companies' | 'apps' | 'settings';
+
+export function page(opts: { title: string; active: NavKey; run: CurrentRun | null; body: string; css?: string }): string {
   const navLink = (href: string, key: string, label: string) =>
     `<a href="${href}" class="${opts.active === key ? 'on' : ''}">${label}</a>`;
   const run = opts.run
@@ -51,7 +53,7 @@ export function page(opts: { title: string; active: 'leads' | 'settings'; run: C
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(opts.title)}</title>
 <style>${CSS}${opts.css ?? ''}</style></head><body>
-<nav><span class="brand">App Store Leads</span>${navLink('/', 'leads', 'Лиды')}${navLink('/settings', 'settings', 'Что парсить')}${run}</nav>
+<nav><span class="brand">App Store Leads</span>${navLink('/', 'companies', 'Компании')}${navLink('/apps', 'apps', 'Приложения')}${navLink('/settings', 'settings', 'Что парсить')}${run}</nav>
 ${opts.body}
 </body></html>`;
 }

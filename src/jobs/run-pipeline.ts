@@ -6,12 +6,17 @@ import { pgChartCache } from '../apple/chart-cache.js';
 import { lookupPublishers, lookupWithFallback } from '../apple/lookup.js';
 import { buildCandidates, heuristicSignals, priorityScore, type Candidate } from '../pipeline/aggregate.js';
 import { llmErrorText, qualifyCandidate } from '../llm/qualify.js';
-import { enrichContacts } from '../contacts/enrich.js';
+import { developerDomains, enrichCompanyContacts, finalizeEmails } from '../contacts/company.js';
+import { isFreeMailDomain, type CompanyEmails } from '../contacts/emails.js';
+import { hunterDomainSearch, HunterError } from '../contacts/hunter.js';
 import { findLinkedIn, SearchApiError } from '../contacts/people-search.js';
 import {
-  hideExcludedPublishers, initSchema, leadsForRescore, leadsNeedingContacts, leadsNeedingLinkedInSearch, pool,
-  recentlyQualified, refreshSignals, saveContacts, saveLinkedInSearch, saveQualification, upsertLead,
+  hideExcludedPublishers, initSchema, leadsForRescore, pool, recentlyQualified, refreshSignals, saveQualification, upsertLead,
 } from '../db/pool.js';
+import {
+  companiesNeedingContacts, companiesNeedingHunter, companiesNeedingLinkedIn, emailInputs, saveCompanyContacts,
+  saveCompanyEmails, saveHunter, saveLinkedIn, savePortfolio,
+} from '../db/companies.js';
 import { getParseSettings, type ParseSettings } from '../settings.js';
 
 /** Отчёт о ходе прохода: этап и счётчик — дашборд показывает его, пока проход идёт. */
@@ -46,33 +51,57 @@ export interface PipelineResult {
   targets: number;
   qualified: number;
   saved: number;
-  contactsChecked: number;
-  contactsFound: number;
+  contactsChecked: number;    // компаний проверено
+  contactsFound: number;      // из них с почтой
+  personalFound?: number;     // из них с личной почтой
   llmErrors: number;
   failedCharts: string[];
   linkedin?: LinkedInSearchResult;
+  hunter?: HunterRunResult;
 }
 
 export interface LinkedInSearchResult {
   searched: number;
   companies: number;
   people: number;
+  sized?: number;             // у скольких нашёлся размер компании
   error?: string;
   skipped?: string;
 }
 
+export interface HunterRunResult {
+  searched: number;
+  emails: number;
+  error?: string;
+  skipped?: string;
+}
+
+/** Все оценки упали — это не «оценено 0», а сломанный ключ, лимит или недоступный API. */
+function assertLlmWorked(total: number, ok: number, failed: number, firstError: string): void {
+  if (total > 0 && ok === 0 && failed > 0) throw new Error(`оценка моделью не прошла: ${firstError}`);
+}
+
+/** Пересобирает почту компании из всего собранного (сторы, сайт, люди из LinkedIn, Hunter). */
+async function refreshEmails(companyId: number): Promise<CompanyEmails | null> {
+  const inputs = await emailInputs(companyId);
+  if (!inputs) return null;
+  const emails = finalizeEmails(inputs);
+  await saveCompanyEmails(companyId, emails);
+  return emails;
+}
+
 /**
- * Автопоиск LinkedIn через поисковый API для целевых лидов, у которых ещё не искали.
- * Без ключа — пропуск. Если API отклонил ключ или кончились кредиты — останавливаемся,
+ * Автопоиск LinkedIn через поисковый API для целевых компаний (затем под вопросом): страница компании
+ * с размером и люди. Без ключа — пропуск. Если API отклонил ключ или кончились кредиты — останавливаемся,
  * прогон при этом не падает: почта и остальное уже собраны.
  */
 export async function runLinkedInSearch(report: Report = silent): Promise<LinkedInSearchResult> {
   if (!config.search.apiKey) return { searched: 0, companies: 0, people: 0, skipped: 'SERPER_API_KEY не задан' };
-  const targets = await leadsNeedingLinkedInSearch(config.search.maxPerRun);
-  if (targets.length === 0) return { searched: 0, companies: 0, people: 0 };
-  console.log(`  LinkedIn: ищу для ${targets.length} лидов`);
+  const targets = await companiesNeedingLinkedIn(config.search.maxPerRun);
+  if (targets.length === 0) return { searched: 0, companies: 0, people: 0, sized: 0 };
+  console.log(`  LinkedIn: ищу для ${targets.length} компаний`);
   const gate = pLimit(2);
-  const result: LinkedInSearchResult = { searched: 0, companies: 0, people: 0 };
+  const result: LinkedInSearchResult = { searched: 0, companies: 0, people: 0, sized: 0 };
   let stop = false;
   report(`LinkedIn 0/${targets.length}`);
   await Promise.all(
@@ -80,10 +109,18 @@ export async function runLinkedInSearch(report: Report = silent): Promise<Linked
       gate(async () => {
         if (stop) return;
         try {
-          const found = await findLinkedIn(t.developer, t);
-          await saveLinkedInSearch(t.trackId, found);
+          const found = await findLinkedIn(
+            t.name,
+            { website: t.website, email: t.email, supportUrl: t.supportUrl, privacyUrl: t.privacyUrl },
+            undefined,
+            { company: t.needCompany, people: t.needPeople, knownCompanyUrl: t.linkedinSource === 'site' ? t.linkedinUrl : null },
+          );
+          await saveLinkedIn(t.id, found, { company: t.needCompany, people: t.needPeople });
+          // люди дают имена: личные адреса привязываются к ним, по шаблону домена составляются остальные
+          if (t.needPeople) await refreshEmails(t.id);
           result.searched++;
           if (found.companyUrl) result.companies++;
+          if (found.companySize) result.sized!++;
           result.people += found.people.length;
         } catch (e) {
           if (e instanceof SearchApiError && e.fatal) {
@@ -92,47 +129,109 @@ export async function runLinkedInSearch(report: Report = silent): Promise<Linked
           }
           console.warn(`  ⚠ LinkedIn ${t.name}: ${(e as Error).message}`);
         }
-        report(`LinkedIn ${result.searched}/${targets.length}, компаний ${result.companies}, людей ${result.people}`);
+        report(`LinkedIn ${result.searched}/${targets.length}, компаний ${result.companies}, с размером ${result.sized}, людей ${result.people}`);
       }),
     ),
   );
-  console.log(`  LinkedIn: компании у ${result.companies}, людей ${result.people} из ${result.searched} лидов${result.error ? ` — остановлено: ${result.error}` : ''}`);
+  console.log(`  LinkedIn: страницы у ${result.companies}, размер у ${result.sized}, людей ${result.people} из ${result.searched} компаний${result.error ? ` — остановлено: ${result.error}` : ''}`);
   return result;
 }
 
-/** Все оценки упали — это не «оценено 0», а сломанный ключ, лимит или недоступный API. */
-function assertLlmWorked(total: number, ok: number, failed: number, firstError: string): void {
-  if (total > 0 && ok === 0 && failed > 0) throw new Error(`оценка моделью не прошла: ${firstError}`);
+/** Hunter.io для целевых компаний со своим доменом: личная почта сотрудников, шаблон, размер. Без ключа — пропуск. */
+export async function runHunter(report: Report = silent): Promise<HunterRunResult> {
+  if (!config.hunter.apiKey) return { searched: 0, emails: 0, skipped: 'HUNTER_API_KEY не задан' };
+  const targets = await companiesNeedingHunter(config.hunter.maxPerRun);
+  const result: HunterRunResult = { searched: 0, emails: 0 };
+  for (const t of targets) {
+    const emailDomain = t.email?.split('@')[1];
+    const domain =
+      developerDomains([t.website, t.supportUrl, t.privacyUrl])[0] ??
+      (emailDomain && !isFreeMailDomain(emailDomain) ? emailDomain : null);
+    try {
+      if (!domain) {
+        await saveHunter(t.id, null, null);
+        continue;
+      }
+      const found = await hunterDomainSearch(domain);
+      await saveHunter(t.id, domain, found);
+      await refreshEmails(t.id);
+      result.searched++;
+      result.emails += found.emails.length;
+      report(`Hunter ${result.searched}/${targets.length}, адресов ${result.emails}`);
+    } catch (e) {
+      console.warn(`  ⚠ Hunter ${domain}: ${(e as Error).message}`);
+      if (e instanceof HunterError && e.fatal) {
+        result.error = e.message;
+        break;
+      }
+    }
+  }
+  if (targets.length) console.log(`  Hunter: ${result.searched} доменов, адресов ${result.emails}${result.error ? ` — остановлено: ${result.error}` : ''}`);
+  return result;
 }
 
-/** Контакты для подходящих лидов, которые ещё не проверяли (или давно). */
-export async function runContacts(report: Report = silent): Promise<{ checked: number; found: number; linkedin: number }> {
-  const targets = await leadsNeedingContacts(config.contacts.recheckDays);
-  if (targets.length === 0) return { checked: 0, found: 0, linkedin: 0 };
-  console.log(`  контакты: проверяю ${targets.length} лидов`);
-  const gate = pLimit(config.contacts.concurrency);
-  let found = 0;
-  let linkedin = 0;
-  let done = 0;
-  report(`контакты 0/${targets.length}`);
-  await Promise.all(
-    targets.map((t) =>
-      gate(async () => {
-        try {
-          const contacts = await enrichContacts(t);
-          await saveContacts(t.trackId, contacts);
-          if (contacts.email) found++;
-          if (contacts.linkedinUrl) linkedin++;
-          if (contacts.errors.length) console.warn(`  ⚠ контакты ${t.name}: ${contacts.errors.join('; ')}`);
-        } catch (e) {
-          console.warn(`  ⚠ контакты ${t.name}: ${(e as Error).message}`);
-        }
-        report(`контакты ${++done}/${targets.length}, почта у ${found}, LinkedIn у ${linkedin}`);
-      }),
-    ),
-  );
-  console.log(`  контакты: почта найдена у ${found} из ${targets.length}, LinkedIn у ${linkedin}`);
-  return { checked: targets.length, found, linkedin };
+/** Все приложения компаний в App Store — пачками по 20 издателей за запрос (iTunes Lookup лимитирован). */
+async function fillPortfolios(artistIds: number[], report: Report): Promise<void> {
+  if (artistIds.length === 0) return;
+  report(`приложения компаний в App Store (${artistIds.length})`);
+  const stats = await lookupPublishers(artistIds);
+  for (const [artistId, s] of stats) await savePortfolio(artistId, s);
+}
+
+export interface CompaniesResult {
+  checked: number;
+  withEmail: number;
+  withPersonal: number;
+  linkedinSite: number;
+  linkedin: LinkedInSearchResult;
+  hunter: HunterRunResult;
+}
+
+/**
+ * Контакты на уровне компаний: для компаний с подходящими приложениями, которые ещё не проверяли
+ * (или давно), — сторы и сайт; затем LinkedIn (люди и размер) и Hunter, у каждого свой лимит.
+ */
+export async function runCompanies(report: Report = silent): Promise<CompaniesResult> {
+  const targets = await companiesNeedingContacts(config.contacts.recheckDays);
+  const result = { checked: 0, withEmail: 0, withPersonal: 0, linkedinSite: 0 };
+  if (targets.length) {
+    console.log(`  компании: проверяю ${targets.length}`);
+    await fillPortfolios(targets.filter((t) => !t.hasPortfolio).map((t) => t.artistId), report);
+    const gate = pLimit(config.contacts.concurrency);
+    report(`компании 0/${targets.length}`);
+    await Promise.all(
+      targets.map((t) =>
+        gate(async () => {
+          try {
+            const contacts = await enrichCompanyContacts(t);
+            await saveCompanyContacts(t.id, contacts);
+            const emails = await refreshEmails(t.id);
+            if (emails?.best) result.withEmail++;
+            if (emails?.emails.some((e) => e.kind === 'personal' && !e.guessed)) result.withPersonal++;
+            if (contacts.linkedinSite) result.linkedinSite++;
+            if (contacts.errors.length) console.warn(`  ⚠ ${t.name}: ${contacts.errors.join('; ')}`);
+          } catch (e) {
+            console.warn(`  ⚠ ${t.name}: ${(e as Error).message}`);
+          }
+          report(`компании ${++result.checked}/${targets.length}, с почтой ${result.withEmail}, с личной ${result.withPersonal}`);
+        }),
+      ),
+    );
+    console.log(`  компании: почта у ${result.withEmail} из ${targets.length}, личная у ${result.withPersonal}, LinkedIn на сайте у ${result.linkedinSite}`);
+  }
+  const linkedin = await runLinkedInSearch(report);
+  const hunter = await runHunter(report);
+  // правила разбора почты могли поменяться — пересобираем у всех проверенных компаний (без сети)
+  report('пересборка почты компаний');
+  await refreshAllEmails();
+  return { ...result, linkedin, hunter };
+}
+
+/** Пересобирает почту всех проверенных компаний из сохранённых данных: после правки правил личная/общая. */
+export async function refreshAllEmails(): Promise<number> {
+  const { rows } = await pool.query(`SELECT id FROM companies WHERE checked_at IS NOT NULL`);
+  for (const r of rows) await refreshEmails(r.id);
+  return rows.length;
 }
 
 /**
@@ -174,7 +273,7 @@ export async function runRescore({ all = false } = {}): Promise<{ rescored: numb
   assertLlmWorked(leads.length, rescored, failedLlm, firstLlmError);
 
   // новым целевым и «под вопросом» нужны контакты
-  await runContacts();
+  await runCompanies();
   return { rescored, byTier };
 }
 
@@ -291,27 +390,28 @@ export async function runPipeline({ dryRun = false, settings, report = silent }:
   console.log(`  оценено моделью: ${saved} / ${toQualify.length}`);
   assertLlmWorked(toQualify.length, saved, failedLlm, firstLlmError);
 
-  // 7. Контакты для подходящих лидов, затем автопоиск LinkedIn для целевых
-  const contacts = await runContacts(report);
-  const linkedin = await runLinkedInSearch(report);
+  // 7. Контакты компаний (сторы, сайт), затем LinkedIn и Hunter
+  const companies = await runCompanies(report);
 
   const dt = ((Date.now() - t0) / 1000).toFixed(1);
-  console.log(`✅ готово за ${dt}s — просканировано ${candidates.length}, оценено ${saved}, с почтой +${contacts.found}`);
+  console.log(`✅ готово за ${dt}s — просканировано ${candidates.length}, оценено ${saved}, компаний с почтой +${companies.withEmail}`);
   return {
     scanned: candidates.length, targets: targets.length, qualified: toQualify.length, saved,
-    contactsChecked: contacts.checked, contactsFound: contacts.found, llmErrors: failedLlm, failedCharts: failed,
-    linkedin,
+    contactsChecked: companies.checked, contactsFound: companies.withEmail, personalFound: companies.withPersonal,
+    llmErrors: failedLlm, failedCharts: failed, linkedin: companies.linkedin, hunter: companies.hunter,
   };
 }
 
-// Прямой запуск: npm run ingest [-- --dry-run | --contacts-only | --linkedin | --rescore | --rescore-all]
+// Прямой запуск: npm run ingest [-- --dry-run | --contacts-only | --linkedin | --hunter | --refresh-emails | --rescore | --rescore-all]
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const arg = (flag: string) => process.argv.includes(flag);
   try {
     // схема нужна и dry run'у: он пишет только в кэш чартов
     if (config.databaseUrl) await initSchema();
-    if (arg('--contacts-only')) await runContacts();
+    if (arg('--contacts-only')) await runCompanies();
     else if (arg('--linkedin')) await runLinkedInSearch();
+    else if (arg('--hunter')) await runHunter();
+    else if (arg('--refresh-emails')) console.log(`  почта пересобрана у ${await refreshAllEmails()} компаний`);
     else if (arg('--rescore') || arg('--rescore-all')) await runRescore({ all: arg('--rescore-all') });
     else await runPipeline({ dryRun: arg('--dry-run') });
   } catch (e) {

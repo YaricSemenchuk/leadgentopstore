@@ -21,8 +21,16 @@ export interface LinkedInPerson {
   url: string;
 }
 
+/** Размер компании из карточки LinkedIn: «Company size: 51-200 employees». */
+export interface CompanySize {
+  range: string;   // «51-200», «10001+»
+  min: number;     // нижняя граница — для фильтра «от 50 сотрудников»
+}
+
 export interface LinkedInFound {
   companyUrl: string | null;
+  companyConfirmed: boolean;   // страница найдена по своему домену, а не только по названию
+  companySize: CompanySize | null;
   people: LinkedInPerson[];
 }
 
@@ -41,8 +49,44 @@ const SerperResponse = z.object({
 
 const SERPER_URL = 'https://google.serper.dev/search';
 
-/** Версия правил отбора: при росте лиды, где поиск что-то нашёл, перепроверяются. */
+/** Версия правил отбора людей: при росте компании, где поиск что-то нашёл, перепроверяются. */
 export const LINKEDIN_SEARCH_VERSION = 3;
+
+/** Версия поиска страницы компании: v4 — с размером компании (запрос с «Company size»). */
+export const LINKEDIN_COMPANY_VERSION = 4;
+
+// «Company size: 51-200 employees» на языке страницы: Google показывает карточку на языке поддомена.
+const NUM = '([\\d.,\\s]*\\d\\s*(?:[-–]\\s*[\\d.,\\s]*\\d)?\\s*\\+?)';
+const SIZES = [
+  new RegExp(`Company size\\s*[:：]?\\s*${NUM}\\s*employees`, 'i'),
+  new RegExp(`회사 규모\\s*(?:직원)?\\s*${NUM}\\s*명`),
+  new RegExp(`(?:公司规模|公司規模|企業規模|会社規模)\\s*[:：]?\\s*${NUM}\\s*(?:名|人)`),
+  new RegExp(`Unternehmensgröße\\s*[:：]?\\s*${NUM}\\s*Beschäftigte`, 'i'),
+  new RegExp(`Taille de l.entreprise\\s*[:：]?\\s*${NUM}\\s*employés`, 'i'),
+  new RegExp(`Tamaño de la empresa\\s*[:：]?\\s*${NUM}\\s*empleados`, 'i'),
+  new RegExp(`Tamanho da empresa\\s*[:：]?\\s*${NUM}\\s*funcionários`, 'i'),
+  new RegExp(`Şirket büyüklüğü\\s*[:：]?\\s*${NUM}\\s*çalışan`, 'i'),
+  new RegExp(`Размер компании\\s*[:：]?\\s*${NUM}\\s*сотрудник`, 'i'),
+];
+
+export function parseCompanySize(text: string): CompanySize | null {
+  const m = SIZES.map((re) => text.match(re)).find(Boolean);
+  if (!m) return null;
+  const range = m[1].replace(/\s+/g, '').replace(/–/g, '-').replace(/[.,]/g, '');
+  const min = Number(range.split(/[-+]/)[0]);
+  return Number.isFinite(min) ? { range, min } : null;
+}
+
+/** Слаг страницы компании: «https://tr.linkedin.com/company/fusegamestr?trk=…» → «fusegamestr». */
+export function companySlug(url: string | null | undefined): string | null {
+  const m = (url ?? '').match(COMPANY_URL);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]).toLowerCase();
+  } catch {
+    return m[1].toLowerCase();
+  }
+}
 
 /** Один запрос к Serper. 401/403 — ключ неверный или кредиты кончились: дальше искать бессмысленно. */
 export async function serperSearch(q: string, apiKey = config.search.apiKey): Promise<SearchHit[]> {
@@ -141,7 +185,15 @@ const PROFILE_URL = /^https?:\/\/(?:[a-z]{2,3}\.)?linkedin\.com\/in\/([^/?#]+)/i
  * с чужим сайтом отбрасывается. По одному юрлицу — только если бренда нет вовсе.
  */
 export function pickCompany(hits: SearchHit[], q: LinkedInQueries): string | null {
-  let best: { url: string; score: number } | null = null;
+  return pickCompanyHit(hits, q)?.url ?? null;
+}
+
+/** confirmed — в карточке назван наш домен: это точно та компания, её размеру можно верить. */
+export function pickCompanyHit(
+  hits: SearchHit[],
+  q: LinkedInQueries,
+): { url: string; size: CompanySize | null; confirmed: boolean } | null {
+  let best: { url: string; size: CompanySize | null; confirmed: boolean; score: number } | null = null;
   for (const h of hits) {
     const m = h.link.match(COMPANY_URL);
     if (!m) continue;
@@ -154,9 +206,11 @@ export function pickCompany(hits: SearchHit[], q: LinkedInQueries): string | nul
     const nameHit = namesCompany(pageName, strongTerms(q)) || namesCompany(slug, strongTerms(q));
     if (!domainHit && !nameHit) continue;
     const score = (domainHit ? 2 : 0) + (nameHit ? 1 : 0);
-    if (!best || score > best.score) best = { url: `https://www.linkedin.com/company/${m[1]}/`, score };
+    if (!best || score > best.score) {
+      best = { url: `https://www.linkedin.com/company/${m[1]}/`, size: parseCompanySize(h.snippet), confirmed: domainHit, score };
+    }
   }
-  return best?.url ?? null;
+  return best ? { url: best.url, size: best.size, confirmed: best.confirmed } : null;
 }
 
 /** Serper отдаёт «Имя - Заголовок профиля»; в старом формате бывает хвост «| LinkedIn». */
@@ -235,6 +289,7 @@ export function pickPeople(hits: SearchHit[], q: LinkedInQueries, max = 3): Link
       continue;
     }
     if ([q.brand, q.name].some((t) => contains(name, t))) continue; // «LastShelter Base» — не человек
+    if (title && /^\s*(former|ex[-\s])/i.test(title)) continue; // «Former Director of BD …» — уже не работает
     const employer = currentEmployer(h.snippet);
     const employerOurs = !!employer && isOurs(employer);
     // «Former CEO, Mullvad VPN» — в заголовке бывшая работа; верим только полю «Опыт»
@@ -252,14 +307,58 @@ export function pickPeople(hits: SearchHit[], q: LinkedInQueries, max = 3): Link
     .map(({ rank: _rank, ...p }) => p);
 }
 
-/** Компания и люди для лида: два запроса (для частного лица — один, его профиль). */
+export interface FindOptions {
+  company?: boolean;               // искать страницу компании и её размер (1–2 запроса)
+  people?: boolean;                // искать людей (1 запрос)
+  knownCompanyUrl?: string | null; // ссылка с сайта разработчика: ищем только её размер
+}
+
+/** Запрос размера одной страницы: «site:linkedin.com/company/slug "Company size"» — Google показывает этот блок. */
+export const sizeQuery = (slug: string) => `site:linkedin.com/company/${slug} "Company size"`;
+
+/** Поиск страницы по своему домену: в карточке LinkedIn есть «Website: …» — такая страница точно та. */
+export const domainQuery = (domains: string[]) =>
+  `site:linkedin.com/company (${domains.slice(0, 3).map((d) => `"${d}"`).join(' OR ')}) "Company size"`;
+
+/**
+ * Компания и люди: до трёх запросов (для частного лица — один, его профиль). Страницу компании ищем
+ * обычным запросом; если в описании карточки нет размера — второй запрос по самой странице с
+ * «Company size». Если её карточка называет чужой сайт, страница отбрасывается (однофамилец).
+ */
 export async function findLinkedIn(
   developer: string,
   hints: BrandHints,
   search: (q: string) => Promise<SearchHit[]> = serperSearch,
+  { company = true, people = true, knownCompanyUrl = null }: FindOptions = {},
 ): Promise<LinkedInFound> {
   const lq = linkedinQueries(developer, hints);
-  const companyUrl = lq.person ? null : pickCompany(await search(lq.companyQuery), lq);
-  const people = pickPeople(await search(lq.peopleQuery), lq);
-  return { companyUrl, people };
+  let companyUrl: string | null = null;
+  let companyConfirmed = false;
+  let companySize: CompanySize | null = null;
+  if (company && !lq.person) {
+    // Размер записываем только для подтверждённой страницы: по одному названию находятся
+    // однофамильцы (ром «Takamaka», студия VFX «Stormborn»), а их размер испортил бы фильтр «от 50».
+    const known = companySlug(knownCompanyUrl);
+    const sizeOf = async (slug: string) => {
+      const own = (await search(sizeQuery(slug))).find((h) => companySlug(h.link) === slug);
+      return own ? parseCompanySize(own.snippet) : null;
+    };
+    if (known) {
+      // ссылку дал сам разработчик на сайте — нужен только размер
+      companySize = await sizeOf(known);
+    } else {
+      // 1) по своему домену — страница подтверждена, обычно сразу с размером
+      const byDomain = lq.domains.length ? pickCompanyHit(await search(domainQuery(lq.domains)), lq) : null;
+      if (byDomain?.confirmed) {
+        companyUrl = byDomain.url;
+        companyConfirmed = true;
+        companySize = byDomain.size ?? (await sizeOf(companySlug(byDomain.url)!));
+      } else {
+        // 2) по названию — только ссылка, без размера (бывают однофамильцы)
+        companyUrl = pickCompanyHit(await search(lq.companyQuery), lq)?.url ?? null;
+      }
+    }
+  }
+  const found = people ? pickPeople(await search(lq.peopleQuery), lq) : [];
+  return { companyUrl, companyConfirmed, companySize, people: found };
 }

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { linkedinQueries } from './linkedin.js';
-import { findLinkedIn, parseProfileTitle, pickCompany, pickPeople, roleRank, type SearchHit } from './people-search.js';
+import { findLinkedIn, parseCompanySize, parseProfileTitle, pickCompany, pickPeople, roleRank, type SearchHit } from './people-search.js';
 
 // Фикстуры — форма реальной выдачи Serper (октябрь 2026); имена людей заменены вымышленными.
 
@@ -76,8 +76,10 @@ test('findLinkedIn: два запроса; частное лицо — один,
     queries.push(q);
     return [];
   });
-  assert.equal(queries.length, 2);
-  assert.match(queries[0], /^site:linkedin\.com\/company \("lastshelter" OR "LAST ORIGIN STUDIO"\)$/);
+  // сначала по своему домену, ничего не нашлось — по названию, затем люди
+  assert.equal(queries.length, 3);
+  assert.equal(queries[0], 'site:linkedin.com/company ("lastshelter.net") "Company size"');
+  assert.match(queries[1], /^site:linkedin\.com\/company \("lastshelter" OR "LAST ORIGIN STUDIO"\)$/);
 
   const person = await findLinkedIn('Luong Vuong', {}, async () => [
     { title: 'Luong Vuong - Indie Game Developer', link: 'https://vn.linkedin.com/in/luongvuong', snippet: '' },
@@ -151,4 +153,73 @@ test('частный разработчик: однофамильцы не из 
     { title: 'Thu Nguyen - Systems Engineer at Marvel Studios', link: 'https://www.linkedin.com/in/thu-4', snippet: '' },
   ];
   assert.deepEqual(pickPeople(hits, q).map((p) => p.url), ['https://www.linkedin.com/in/thu-3/']);
+});
+
+test('размер компании из описания карточки LinkedIn', () => {
+  assert.deepEqual(parseCompanySize('Website: https://fusegam.es/ ; Industry: Mobile Gaming Apps ; Company size: 11-50 employees ; Headquarters: İstanbul'), { range: '11-50', min: 11 });
+  assert.deepEqual(parseCompanySize('Company size: 1,001-5,000 employees. Headquarters: Limassol'), { range: '1001-5000', min: 1001 });
+  assert.deepEqual(parseCompanySize('Company size: 10,001+ employees'), { range: '10001+', min: 10001 });
+  assert.equal(parseCompanySize('Fuse Games | 11328 followers on LinkedIn'), null);
+});
+
+test('findLinkedIn: размер в карточке выбранной страницы — один запрос', async () => {
+  const queries: string[] = [];
+  const found = await findLinkedIn('Fuse Entertainment INC', { email: 'support@fusegames.io' }, async (q) => {
+    queries.push(q);
+    return [
+      { title: 'Fuse Games', link: 'https://uk.linkedin.com/company/fuse-games-uk', snippet: 'Website: www.fusegames.com. Company size: 51-200 employees.' },
+      { title: 'Fuse Games', link: 'https://www.linkedin.com/company/fuse-games-official', snippet: 'Website: https://fusegames.io ; Company size: 11-50 employees' },
+    ];
+  }, { people: false });
+  assert.equal(queries.length, 1);
+  assert.equal(found.companyUrl, 'https://www.linkedin.com/company/fuse-games-official/');
+  assert.deepEqual(found.companySize, { range: '11-50', min: 11 });
+});
+
+test('findLinkedIn: ссылка с сайта разработчика — размер из её карточки, чужой не берётся', async () => {
+  const hits: SearchHit[] = [
+    { title: 'Fuse Games', link: 'https://tr.linkedin.com/company/fusegamestr', snippet: 'Industry: Mobile Gaming Apps ; Company size: 11-50 employees' },
+  ];
+  const own = await findLinkedIn('Fuse Entertainment INC', { website: 'https://fusegam.es' }, async () => hits,
+    { people: false, knownCompanyUrl: 'https://www.linkedin.com/company/fusegamestr/' });
+  assert.deepEqual(own.companySize, { range: '11-50', min: 11 });
+  const other = await findLinkedIn('Fuse Entertainment INC', { website: 'https://fusegam.es' }, async () => hits,
+    { people: false, knownCompanyUrl: 'https://www.linkedin.com/company/some-other/' });
+  assert.equal(other.companySize, null);
+});
+
+test('findLinkedIn: страница по своему домену — с размером; по одному названию — только ссылка', async () => {
+  const run = async (domainHits: SearchHit[]) => {
+    const queries: string[] = [];
+    const found = await findLinkedIn('Fuse Entertainment INC', { email: 'support@fusegames.io' }, async (query) => {
+      queries.push(query);
+      return query.includes('"fusegames.io"')
+        ? domainHits
+        : [{ title: 'Fuse Games TR', link: 'https://tr.linkedin.com/company/fusegamestr', snippet: 'Mobile games studio' }];
+    }, { people: false });
+    return { found, queries };
+  };
+  const ok = await run([{ title: 'Fuse Games', link: 'https://tr.linkedin.com/company/fusegamestr', snippet: 'Website: https://fusegames.io ; Company size: 51-200 employees' }]);
+  assert.equal(ok.queries.length, 1);
+  assert.equal(ok.found.companyUrl, 'https://www.linkedin.com/company/fusegamestr/');
+  assert.deepEqual(ok.found.companySize, { range: '51-200', min: 51 });
+  // однофамилец без нашего сайта в карточке (ром «Takamaka» и т.п.): ссылка по названию, размер не берём
+  const namesake = await run([{ title: 'Fuse Rum', link: 'https://sc.linkedin.com/company/fuse-rum', snippet: 'Company size: 51-200 employees. Headquarters: Mahe' }]);
+  assert.equal(namesake.queries.length, 2);
+  assert.equal(namesake.found.companyUrl, 'https://www.linkedin.com/company/fusegamestr/');
+  assert.equal(namesake.found.companySize, null);
+});
+
+test('домен платформы поддержки не считается доменом разработчика', () => {
+  const q = linkedinQueries('Playchamp Technologies Limited', { website: 'https://games.playchamps.com/', supportUrl: 'https://playchamp.zohodesk.com/portal' });
+  assert.deepEqual(q.domains, ['playchamps.com']);
+});
+
+test('люди: заголовок «Former …» — человек уже ушёл, даже если в «Опыте» осталась компания', () => {
+  const q = linkedinQueries('Prominent Fortune PTE. LTD', { email: 'li.wei@quvideo.com' });
+  const hits: SearchHit[] = [
+    { title: 'Ann Lee - User Acquisition Manager at Quvideo inc.', link: 'https://www.linkedin.com/in/ann', snippet: 'Experience: Quvideo' },
+    { title: 'Joe Fang - Former Director of Business Development', link: 'https://www.linkedin.com/in/joe', snippet: 'Experience: Quvideo' },
+  ];
+  assert.deepEqual(pickPeople(hits, q).map((p) => p.name), ['Ann Lee']);
 });

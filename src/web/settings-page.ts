@@ -31,26 +31,35 @@ function duration(r: RunRow): string {
 
 function linkedinSummary(r: RunRow): string {
   const li = r.result?.linkedin;
-  if (!li || li.skipped) return '';
-  if (li.error) return ` · <span class="warn">LinkedIn: ${esc(li.error)}</span>`;
-  return li.searched ? ` · LinkedIn: компаний ${fmt(li.companies)}, людей ${fmt(li.people)}` : '';
+  const hu = r.result?.hunter;
+  let out = '';
+  if (li && !li.skipped) {
+    if (li.error) out += ` · <span class="warn">LinkedIn: ${esc(li.error)}</span>`;
+    else if (li.searched) out += ` · LinkedIn: страниц ${fmt(li.companies)}${li.sized !== undefined ? `, размер у ${fmt(li.sized)}` : ''}, людей ${fmt(li.people)}`;
+  }
+  if (hu && !hu.skipped) {
+    if (hu.error) out += ` · <span class="warn">Hunter: ${esc(hu.error)}</span>`;
+    else if (hu.searched) out += ` · Hunter: доменов ${fmt(hu.searched)}, адресов ${fmt(hu.emails)}`;
+  }
+  return out;
 }
 
 function runSummary(r: RunRow): string {
   if (r.error) return `<span class="bad">${esc(r.error)}</span>`;
   if (!r.result) return '';
   if (r.params?.kind === 'contacts') {
-    return `проверено ${fmt(r.result.contactsChecked)}, почта у ${fmt(r.result.contactsFound)}, LinkedIn на сайте у ${fmt(r.result.linkedinFound)}${linkedinSummary(r)}`;
+    const personal = r.result.personalFound !== undefined ? `, личная у ${fmt(r.result.personalFound)}` : '';
+    return `компаний проверено ${fmt(r.result.contactsChecked)}, почта у ${fmt(r.result.contactsFound)}${personal}, LinkedIn на сайте у ${fmt(r.result.linkedinFound)}${linkedinSummary(r)}`;
   }
   const failed = r.result.failedCharts?.length ?? 0;
   const llmErrors = r.result.llmErrors ?? 0;
-  return `просканировано ${fmt(r.result.scanned)}, оценено ${fmt(r.result.saved)}, почта +${fmt(r.result.contactsFound)}${failed ? ` · <span class="warn">чартов не пришло: ${failed}</span>` : ''}${llmErrors ? ` · <span class="warn">ошибок оценки: ${llmErrors}</span>` : ''}${linkedinSummary(r)}`;
+  return `просканировано ${fmt(r.result.scanned)}, оценено ${fmt(r.result.saved)}, компаний с почтой +${fmt(r.result.contactsFound)}${failed ? ` · <span class="warn">чартов не пришло: ${failed}</span>` : ''}${llmErrors ? ` · <span class="warn">ошибок оценки: ${llmErrors}</span>` : ''}${linkedinSummary(r)}`;
 }
 
 function scope(r: RunRow): string {
   const p = r.params;
   if (!p) return '';
-  if (p.kind === 'contacts') return 'контакты и LinkedIn';
+  if (p.kind === 'contacts') return 'контакты компаний';
   return `${p.countries?.length ?? 0} стран × ${p.genres?.length ?? 0} кат. × ${p.charts?.length ?? 0} чарт.`;
 }
 
@@ -63,6 +72,7 @@ export function renderSettingsPage(o: {
   runs: RunRow[];
   flash?: Flash;
   searchEnabled?: boolean;
+  hunterEnabled?: boolean;
 }): string {
   const s = o.settings;
   const est = estimate(s);
@@ -113,13 +123,17 @@ export function renderSettingsPage(o: {
 
   <div class="card"><h2>Статус</h2>${status}
     <form method="post" action="/runs/contacts" class="bar">
-      <button type="submit"${running ? ' disabled title="Сбор уже идёт"' : ''}>Дособрать контакты и LinkedIn</button>
-      <span class="mut small">Без модели: почта и LinkedIn для уже найденных лидов, у которых их ещё не искали. Работает и при исчерпанном лимите Anthropic.</span>
+      <button type="submit"${running ? ' disabled title="Сбор уже идёт"' : ''}>Дособрать контакты компаний</button>
+      <span class="mut small">Без модели: для компаний с целевыми приложениями и приложениями «под вопросом» — блок продавца в App Store ЕС (D-U-N-S, адрес, почта), Google Play (почта аккаунта, все приложения), сайт (контакты, команда, импрессум), затем LinkedIn и Hunter. Работает и при исчерпанном лимите Anthropic.</span>
     </form>
     <p class="small">${
       o.searchEnabled
-        ? '<span class="ok">Автопоиск LinkedIn включён</span> (Serper): после сбора контактов для целевых лидов ищутся страница компании и люди — CEO, основатели, маркетинг.'
+        ? '<span class="ok">Автопоиск LinkedIn включён</span> (Serper): страница компании с размером и люди — CEO, основатели, маркетинг; сначала целевые компании, затем «под вопросом».'
         : '<span class="mut">Автопоиск LinkedIn выключен: задай переменную SERPER_API_KEY (ключ с serper.dev).</span>'
+    }<br>${
+      o.hunterEnabled
+        ? '<span class="ok">Hunter включён</span>: личная почта сотрудников, шаблон почты и размер компании.'
+        : '<span class="mut">Hunter выключен: задай HUNTER_API_KEY (hunter.io, 25 бесплатных запросов в месяц) — даст личную почту сотрудников и шаблон адресов.</span>'
     }</p>
     ${runsTable}</div>
 
