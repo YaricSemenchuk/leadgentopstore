@@ -1,6 +1,8 @@
 import { pool } from '../db/pool.js';
 import { getParseSettings } from '../settings.js';
-import { llmKeyMissing, runCompanies, runPipeline, type HunterRunResult, type LinkedInSearchResult } from './run-pipeline.js';
+import {
+  llmKeyMissing, runCompanies, runPipeline, type HunterRunResult, type LinkedInSearchResult, type TregRunResult,
+} from './run-pipeline.js';
 
 /**
  * Запуск прохода из дашборда или по API: не больше одного одновременно (сервис на Railway
@@ -9,7 +11,7 @@ import { llmKeyMissing, runCompanies, runPipeline, type HunterRunResult, type Li
 
 export type RunTrigger = 'ui' | 'api';
 
-/** full — сбор, оценка и контакты; contacts — только дособрать контакты компаний, LinkedIn и Hunter (без модели). */
+/** full — сбор, оценка и контакты; contacts — только дособрать контакты компаний, LinkedIn, Hunter и Treg (без модели). */
 export type RunKind = 'full' | 'contacts';
 
 export interface CurrentRun {
@@ -62,6 +64,7 @@ export async function startRun(
           linkedinFound: r.linkedinSite,
           linkedin: r.linkedin,
           hunter: r.hunter,
+          treg: r.treg,
         }))
       : runPipeline({ settings, report });
   work
@@ -88,7 +91,7 @@ export interface RunRow {
   result: {
     scanned?: number; saved?: number; contactsChecked?: number; contactsFound?: number; personalFound?: number;
     linkedinFound?: number; llmErrors?: number; failedCharts?: string[]; linkedin?: LinkedInSearchResult;
-    hunter?: HunterRunResult;
+    hunter?: HunterRunResult; treg?: TregRunResult;
   } | null;
   error: string | null;
   params: { kind?: RunKind; countries?: string[]; genres?: string[]; charts?: string[] } | null;

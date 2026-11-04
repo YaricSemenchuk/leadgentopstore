@@ -15,7 +15,19 @@ export const SOURCE_LABEL: Record<EmailSource, string> = {
   privacy_policy: 'политика',
   website: 'сайт',
   hunter: 'Hunter',
+  treg: 'Treg: поиск по имени',
+  pattern: 'шаблон домена',
 };
+
+const SIZE_SOURCE: Record<string, string> = { linkedin: 'LinkedIn', hunter: 'Hunter', treg: 'Treg' };
+
+/** Проверка ящика: ✓ — принимает почту; accept_all — домен принимает всё, доставка не гарантирована. */
+function statusBadge(e: Pick<CompanyEmail, 'status'>): string {
+  if (e.status === 'valid') return ' · <span class="ok" title="ящик принимает почту">✓ проверен</span>';
+  if (e.status === 'accept_all') return ' · <span class="warn" title="сервер принимает любой адрес — доставку не подтвердить">домен принимает всё</span>';
+  if (e.status === 'unknown') return ' · <span class="mut">проверка не дала ответа</span>';
+  return '';
+}
 
 const SIZE_TABS: Array<[SizeFilter, string]> = [
   ['any', 'Любой размер'],
@@ -57,7 +69,7 @@ const link = (href: unknown, label: string) => {
 
 export function sizeLabel(r: any): string {
   if (r.kind === 'individual') return 'частное лицо';
-  if (r.employees) return `${esc(r.employees)} сотрудников <span class="mut">(${r.employees_source === 'hunter' ? 'Hunter' : 'LinkedIn'})</span>`;
+  if (r.employees) return `${esc(r.employees)} сотрудников <span class="mut">(${esc(SIZE_SOURCE[r.employees_source] ?? r.employees_source ?? 'LinkedIn')})</span>`;
   return '<span class="mut">размер неизвестен</span>';
 }
 
@@ -74,7 +86,7 @@ function emailLine(e: CompanyEmail): string {
   const who = e.person ? `<div class="small">${esc(e.person)}${e.title ? ` · <span class="mut">${esc(e.title)}</span>` : ''}</div>` : '';
   const src = e.sources.map((s) => SOURCE_LABEL[s] ?? s).join(', ');
   return `<div class="em"><a class="mail" href="mailto:${esc(e.email)}">${esc(e.email)}</a>${who}
-    <div class="small mut">${esc(src)}${e.free ? ' · бесплатный ящик' : ''}</div></div>`;
+    <div class="small mut">${esc(src)}${e.free ? ' · бесплатный ящик' : ''}${statusBadge(e)}</div></div>`;
 }
 
 function personalCell(r: any): string {
@@ -86,7 +98,7 @@ function personalCell(r: any): string {
   const guessedHtml = guessed.length
     ? `<details class="guess"><summary class="warn small">по шаблону ${esc(pattern ?? '')}: ${guessed.length} — не проверены</summary>
         ${guessed.map((e) => `<div class="em"><a class="mail" href="mailto:${esc(e.email)}">${esc(e.email)}</a>
-          <div class="small">${esc(e.person)}${e.title ? ` · <span class="mut">${esc(e.title)}</span>` : ''}</div></div>`).join('')}</details>`
+          <div class="small">${esc(e.person)}${e.title ? ` · <span class="mut">${esc(e.title)}</span>` : ''}${statusBadge(e)}</div></div>`).join('')}</details>`
     : '';
   return (real.length ? real.map(emailLine).join('') : '<span class="mut">не найдено</span>') + guessedHtml;
 }
@@ -170,7 +182,7 @@ export function renderCompaniesPage(o: {
     run: o.run,
     body: `
   <h1>Компании</h1>
-  <p class="sub">Целевых компаний: <b>${stats.target}</b> (их приложений в чартах: ${stats.target_apps}) · с личной почтой ${stats.target_with_personal} · с любой почтой ${stats.target_with_email} · от 50 сотрудников ${stats.target_50} (вместе с «под вопросом» — ${stats.active_50}) · юрлицо подтверждено ${stats.target_verified} · в Google Play ${stats.target_on_play} · с LinkedIn ${stats.target_with_linkedin}
+  <p class="sub">Целевых компаний: <b>${stats.target}</b> (их приложений в чартах: ${stats.target_apps}) · с личной почтой ${stats.target_with_personal} · с любой почтой ${stats.target_with_email}${stats.target_best_valid ? ` (адрес проверен у ${stats.target_best_valid})` : ''} · от 50 сотрудников ${stats.target_50} (вместе с «под вопросом» — ${stats.active_50}; размер известен у ${stats.target_sized} целевых) · юрлицо подтверждено ${stats.target_verified} · в Google Play ${stats.target_on_play} · с LinkedIn ${stats.target_with_linkedin}
     <br>Под вопросом: ${stats.maybe} · мимо: ${stats.skip} (скрыты)${stats.unchecked ? ` · <span class="warn">контакты не проверены: ${stats.unchecked}</span> — «Дособрать контакты» на странице <a href="/settings">Что парсить</a>` : ''}</p>
   <div class="bar">
     ${viewTab('active', 'Целевые и под вопросом')}${viewTab('target', 'Только целевые')}${viewTab('maybe', 'Под вопросом')}${viewTab('skip', 'Мимо')}
@@ -203,7 +215,7 @@ export function renderCompaniesPage(o: {
 const personalList = (r: any, guessed: boolean) =>
   ((r.emails ?? []) as CompanyEmail[])
     .filter((e) => e.kind === 'personal' && e.guessed === guessed)
-    .map((e) => `${e.email}${e.person ? ` (${e.person}${e.title ? `, ${e.title}` : ''})` : ''}`)
+    .map((e) => `${e.email}${e.person ? ` (${e.person}${e.title ? `, ${e.title}` : ''})` : ''}${e.status ? ` [${e.status}]` : ''}`)
     .join(' | ');
 
 export const COMPANY_CSV: Array<[string, (r: any) => unknown]> = [
@@ -216,6 +228,7 @@ export const COMPANY_CSV: Array<[string, (r: any) => unknown]> = [
   ['employees', (r) => r.employees],
   ['employees_source', (r) => r.employees_source],
   ['best_email', (r) => r.email],
+  ['best_email_status', (r) => r.best_email_status],
   ['personal_emails', (r) => personalList(r, false)],
   ['guessed_emails', (r) => personalList(r, true)],
   ['email_pattern', (r) => r.email_pattern],

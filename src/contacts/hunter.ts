@@ -2,11 +2,12 @@ import { z } from 'zod';
 import { config } from '../config.js';
 import { normalizeEmail, type FoundEmail } from './emails.js';
 import type { CompanySize } from './people-search.js';
+import { tregCall, TregError } from './treg.js';
 
 /**
  * Hunter.io Domain Search — платный (есть бесплатные 25 запросов в месяц) источник личной почты:
  * один запрос на домен отдаёт адреса сотрудников с именами и должностями, шаблон почты домена
- * и размер компании. Без ключа HUNTER_API_KEY выключен.
+ * и размер компании. Свой ключ HUNTER_API_KEY или через Treg (TREG_TOKEN); без обоих выключен.
  */
 
 export class HunterError extends Error {
@@ -65,7 +66,22 @@ export function parseHunter(json: unknown): HunterResult {
   };
 }
 
+/** Hunter через Treg (hunter.companies.emails): тот же ответ, ключ — у Treg; домен без результатов бесплатен. */
+async function hunterViaTreg(domain: string): Promise<HunterResult> {
+  try {
+    // limit 10 — одна «единица» Hunter, меньше дешевле не будет
+    const r = await tregCall('hunter.companies.emails', { method: 'GET', query: { domain, limit: 10 }, maxCostUsd: 0.03 });
+    return parseHunter(r.body);
+  } catch (e) {
+    if (e instanceof TregError) throw new HunterError(e.message, e.fatal);
+    throw e;
+  }
+}
+
+export const hunterEnabled = () => !!config.hunter.apiKey || !!config.treg.token;
+
 export async function hunterDomainSearch(domain: string, apiKey = config.hunter.apiKey): Promise<HunterResult> {
+  if (!apiKey) return hunterViaTreg(domain);
   const url = new URL('https://api.hunter.io/v2/domain-search');
   url.searchParams.set('domain', domain);
   url.searchParams.set('limit', '10');

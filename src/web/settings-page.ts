@@ -41,6 +41,16 @@ function linkedinSummary(r: RunRow): string {
     if (hu.error) out += ` · <span class="warn">Hunter: ${esc(hu.error)}</span>`;
     else if (hu.searched) out += ` · Hunter: доменов ${fmt(hu.searched)}, адресов ${fmt(hu.emails)}`;
   }
+  const tr = r.result?.treg;
+  if (tr && !tr.skipped) {
+    const parts = [
+      tr.sizeChecked ? `размер у ${fmt(tr.sized)} из ${fmt(tr.sizeChecked)}` : '',
+      tr.peopleSearched ? `почта у ${fmt(tr.emailsFound)} из ${fmt(tr.peopleSearched)} людей` : '',
+      tr.verified ? `проверено ${fmt(tr.verified)} (действующих ${fmt(tr.valid)}, несуществующих ${fmt(tr.invalid)})` : '',
+    ].filter(Boolean);
+    if (parts.length || tr.spentUsd) out += ` · Treg: ${parts.join(', ') || 'без новых данных'}, $${tr.spentUsd.toFixed(2)}`;
+    if (tr.error) out += ` · <span class="warn">Treg: ${esc(tr.error)}</span>`;
+  }
   return out;
 }
 
@@ -73,6 +83,7 @@ export function renderSettingsPage(o: {
   flash?: Flash;
   searchEnabled?: boolean;
   hunterEnabled?: boolean;
+  treg?: { enabled: boolean; maxUsdPerRun: number; ownSerper: boolean; ownHunter: boolean };
 }): string {
   const s = o.settings;
   const est = estimate(s);
@@ -124,16 +135,20 @@ export function renderSettingsPage(o: {
   <div class="card"><h2>Статус</h2>${status}
     <form method="post" action="/runs/contacts" class="bar">
       <button type="submit"${running ? ' disabled title="Сбор уже идёт"' : ''}>Дособрать контакты компаний</button>
-      <span class="mut small">Без модели: для компаний с целевыми приложениями и приложениями «под вопросом» — блок продавца в App Store ЕС (D-U-N-S, адрес, почта), Google Play (почта аккаунта, все приложения), сайт (контакты, команда, импрессум), затем LinkedIn и Hunter. Работает и при исчерпанном лимите Anthropic.</span>
+      <span class="mut small">Без модели: для компаний с целевыми приложениями и приложениями «под вопросом» — блок продавца в App Store ЕС (D-U-N-S, адрес, почта), Google Play (почта аккаунта, все приложения), сайт (контакты, команда, импрессум), затем LinkedIn, Hunter и Treg. Работает и при исчерпанном лимите Anthropic.</span>
     </form>
     <p class="small">${
       o.searchEnabled
-        ? '<span class="ok">Автопоиск LinkedIn включён</span> (Serper): страница компании с размером и люди — CEO, основатели, маркетинг; сначала целевые компании, затем «под вопросом».'
-        : '<span class="mut">Автопоиск LinkedIn выключен: задай переменную SERPER_API_KEY (ключ с serper.dev).</span>'
+        ? `<span class="ok">Автопоиск LinkedIn включён</span> (Serper${o.treg?.ownSerper ? (o.treg.enabled ? '; когда кончатся бесплатные запросы — через Treg' : '') : ' через Treg'}): страница компании с размером и люди — CEO, основатели, маркетинг; сначала целевые компании, затем «под вопросом».`
+        : '<span class="mut">Автопоиск LinkedIn выключен: задай переменную SERPER_API_KEY (ключ с serper.dev) или TREG_TOKEN.</span>'
     }<br>${
       o.hunterEnabled
-        ? '<span class="ok">Hunter включён</span>: личная почта сотрудников, шаблон почты и размер компании.'
-        : '<span class="mut">Hunter выключен: задай HUNTER_API_KEY (hunter.io, 25 бесплатных запросов в месяц) — даст личную почту сотрудников и шаблон адресов.</span>'
+        ? `<span class="ok">Hunter включён</span>${o.treg?.ownHunter ? '' : ' (через Treg)'}: личная почта сотрудников, шаблон почты и размер компании.`
+        : '<span class="mut">Hunter выключен: задай HUNTER_API_KEY (hunter.io, 25 бесплатных запросов в месяц) или TREG_TOKEN — даст личную почту сотрудников и шаблон адресов.</span>'
+    }<br>${
+      o.treg?.enabled
+        ? `<span class="ok">Treg включён</span>: размер компании по домену, почта людей из LinkedIn по имени, проверка адресов перед рассылкой. Не больше $${esc(o.treg.maxUsdPerRun)} за прогон (TREG_MAX_USD_PER_RUN).`
+        : '<span class="mut">Treg выключен: задай TREG_TOKEN (treg.to) — даст размер компании, почту людей из LinkedIn и проверку адресов, оплата за вызов.</span>'
     }</p>
     ${runsTable}</div>
 

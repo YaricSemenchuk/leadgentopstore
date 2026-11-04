@@ -1,6 +1,8 @@
 import { appStorePage, googlePlayApp, googlePlayDeveloperApps, type PlayDeveloper, type PlayListing, type Trader } from './store-pages.js';
 import { crawlDeveloperSite } from './site.js';
-import { baseDomain, buildCompanyEmails, isFreeMailDomain, type CompanyEmails, type EmailPattern, type FoundEmail, type Person } from './emails.js';
+import {
+  baseDomain, buildCompanyEmails, isFreeMailDomain, type CompanyEmails, type EmailCheck, type EmailPattern, type FoundEmail, type Person,
+} from './emails.js';
 import { looksLikePerson, type LinkedInLink } from './linkedin.js';
 
 /**
@@ -132,9 +134,9 @@ export async function enrichCompanyContacts(input: CompanyInput): Promise<Compan
   };
 }
 
-// Платформы поддержки и политик: их домен — не домен разработчика.
+// Платформы поддержки и политик, хостинг app-ads.txt и соцсети: их домен — не домен разработчика.
 const PLATFORM_DOMAINS =
-  /(^|\.)(zendesk|freshdesk|zohodesk|helpshift|intercom|helpscoutdocs|notion|termly|iubenda|freeprivacypolicy|privacypolicies|app-privacy-policy|firebaseapp|github|gitlab|google|apple|wixsite|blogspot|wordpress|weebly|carrd|webflow|vercel|netlify|herokuapp|feishu|larksuite|tilda|sites|linktr|itch|medium|substack|gitbook)\.[a-z.]+$/;
+  /(^|\.)(zendesk|freshdesk|zohodesk|helpshift|intercom|helpscoutdocs|notion|termly|iubenda|freeprivacypolicy|privacypolicies|app-privacy-policy|firebaseapp|github|gitlab|google|apple|wixsite|blogspot|wordpress|weebly|carrd|webflow|vercel|netlify|herokuapp|feishu|larksuite|tilda|sites|linktr|itch|medium|substack|gitbook|app-ads-txt|facebook|instagram|twitter|tiktok|youtube|linkedin|discord)\.[a-z.]+$/;
 
 /** Домены разработчика: сайт, поддержка и политика, кроме платформ (Zendesk, Termly, Notion…). */
 export function developerDomains(urls: Array<string | null | undefined>): string[] {
@@ -160,13 +162,17 @@ export interface EmailInputs {
   emailsRaw: FoundEmail[];
   hunterEmails: FoundEmail[];
   hunterPattern: EmailPattern | null;
+  /** почта людей, найденная Treg по имени и домену */
+  tregEmails: FoundEmail[];
+  /** проверки ящиков (Treg): адрес → статус */
+  checks: Record<string, EmailCheck>;
   people: Person[];
 }
 
-/** Итоговая почта компании из всего собранного: сторы, сайт, Hunter, люди из LinkedIn. */
+/** Итоговая почта компании из всего собранного: сторы, сайт, Hunter, Treg, люди из LinkedIn, проверки. */
 export function finalizeEmails(i: EmailInputs): CompanyEmails {
   return buildCompanyEmails(
-    [...i.emailsRaw, ...i.hunterEmails],
+    [...i.emailsRaw, ...i.hunterEmails, ...i.tregEmails],
     {
       company: i.name,
       domains: developerDomains([i.website, i.supportUrl, i.privacyUrl]),
@@ -174,5 +180,32 @@ export function finalizeEmails(i: EmailInputs): CompanyEmails {
       individual: i.kind === 'individual',
     },
     i.hunterPattern,
+    i.checks,
   );
+}
+
+const STORE_EMAIL_SOURCES = new Set(['app_store_trader', 'google_play', 'play_developer']);
+
+/**
+ * Почтовые домены компании для поиска почты людей: сначала домены адресов, которые компания сама
+ * опубликовала в сторах (на них точно живёт её почта), затем домены сайта, поддержки и политики.
+ */
+export function mailDomains(
+  emails: Array<{ email: string; sources: string[]; free?: boolean; guessed?: boolean }>,
+  urls: Array<string | null | undefined>,
+): string[] {
+  const out: string[] = [];
+  for (const e of emails) {
+    const d = baseDomain(e.email.split('@')[1] ?? '');
+    if (e.guessed || isFreeMailDomain(d) || PLATFORM_DOMAINS.test(d) || !e.sources.some((s) => STORE_EMAIL_SOURCES.has(s))) continue;
+    if (!out.includes(d)) out.push(d);
+  }
+  for (const d of developerDomains(urls)) if (!out.includes(d)) out.push(d);
+  return out;
+}
+
+/** Домен компании для поиска по нему: сайт, поддержка, политика, иначе — корпоративный адрес. */
+export function companyDomain(urls: Array<string | null | undefined>, email: string | null | undefined): string | null {
+  const emailDomain = email?.split('@')[1];
+  return developerDomains(urls)[0] ?? (emailDomain && !isFreeMailDomain(emailDomain) ? baseDomain(emailDomain) : null);
 }

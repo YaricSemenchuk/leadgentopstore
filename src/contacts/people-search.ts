@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { config } from '../config.js';
 import { baseDomain } from './emails.js';
 import { linkedinQueries, type BrandHints, type LinkedInQueries } from './linkedin.js';
+import { tregCall, TregError } from './treg.js';
 
 /**
  * Автопоиск LinkedIn через поисковый API (Serper — выдача Google). Сам LinkedIn не открываем:
@@ -88,8 +89,46 @@ export function companySlug(url: string | null | undefined): string | null {
   }
 }
 
-/** Один запрос к Serper. 401/403 — ключ неверный или кредиты кончились: дальше искать бессмысленно. */
+// Свой ключ Serper отклонён (кончились бесплатные кредиты) — до конца процесса ищем через Treg.
+let ownKeyDead = false;
+
+export const searchEnabled = () => !!config.search.apiKey || !!config.treg.token;
+
+/** Serper через Treg (serper.web.search, ~$0.001 за запрос): тот же запрос и ответ, ключ у Treg. */
+async function serperViaTreg(q: string): Promise<SearchHit[]> {
+  try {
+    const r = await tregCall('serper.web.search', { method: 'POST', body: { q, num: 10 }, maxCostUsd: 0.005 });
+    const parsed = SerperResponse.safeParse(r.body);
+    if (!parsed.success) throw new SearchApiError('Serper (Treg) вернул ответ в неожиданном формате', true);
+    return parsed.data.organic;
+  } catch (e) {
+    if (e instanceof TregError) throw new SearchApiError(e.message, e.fatal);
+    throw e;
+  }
+}
+
+/**
+ * Один запрос к Serper: своим ключом, а без него (или когда он отклонён) — через Treg.
+ * 401/403 на своём ключе без Treg — ключ неверный или кредиты кончились: дальше искать бессмысленно.
+ */
 export async function serperSearch(q: string, apiKey = config.search.apiKey): Promise<SearchHit[]> {
+  if (!apiKey || ownKeyDead) {
+    if (config.treg.token) return serperViaTreg(q);
+    throw new SearchApiError('SERPER_API_KEY не задан', true);
+  }
+  try {
+    return await serperOwnKey(q, apiKey);
+  } catch (e) {
+    if (e instanceof SearchApiError && e.fatal && config.treg.token && /отклонил ключ/.test(e.message)) {
+      ownKeyDead = true;
+      console.warn(`  ${e.message} — дальше Serper через Treg`);
+      return serperViaTreg(q);
+    }
+    throw e;
+  }
+}
+
+async function serperOwnKey(q: string, apiKey: string): Promise<SearchHit[]> {
   for (let attempt = 1; ; attempt++) {
     let res: Response;
     try {

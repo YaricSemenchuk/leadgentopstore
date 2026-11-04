@@ -132,11 +132,29 @@ export const config = {
     apiKey: (process.env.SERPER_API_KEY ?? '').trim(),
     maxPerRun: num(process.env.LINKEDIN_SEARCH_MAX_PER_RUN, 300),
   },
-  // Hunter.io Domain Search: личная почта сотрудников, шаблон почты домена, размер компании; без ключа выключен
+  // Hunter.io Domain Search: личная почта сотрудников, шаблон почты домена, размер компании.
+  // Свой ключ или через Treg (без ключа и без Treg — выключен).
   hunter: {
     apiKey: (process.env.HUNTER_API_KEY ?? '').trim(),
-    // бесплатный план — 25 запросов в месяц
-    maxPerRun: num(process.env.HUNTER_MAX_PER_RUN, 25),
+    // бесплатный план — 25 запросов в месяц; через Treg платим только за домены, где что-то нашлось
+    maxPerRun: num(process.env.HUNTER_MAX_PER_RUN, (process.env.HUNTER_API_KEY ?? '').trim() ? 25 : 50),
+  },
+  // Treg (treg.to): один токен на платные API — поиск почты по имени, проверка адресов, размер
+  // компании, Hunter и Serper без своих ключей. Оплата за вызов с баланса Treg; без токена выключен.
+  treg: {
+    token: (process.env.TREG_TOKEN ?? '').trim(),
+    // свой экземпляр Treg (он открытый и ставится на свой сервер); по умолчанию — treg.to
+    baseUrl: ((process.env.TREG_BASE_URL ?? '').trim() || 'https://treg.to').replace(/\/+$/, ''),
+    // потолок расходов за прогон, $; Treg ограничивает только один вызов, не цикл
+    maxUsdPerRun: num(process.env.TREG_MAX_USD_PER_RUN, 3),
+    sizeMaxPerRun: num(process.env.TREG_SIZE_MAX_PER_RUN, 400),
+    findMaxPerRun: num(process.env.TREG_FIND_MAX_PER_RUN, 150),
+    verifyMaxPerRun: num(process.env.TREG_VERIFY_MAX_PER_RUN, 400),
+    // через сколько дней перепроверять адрес
+    verifyRecheckDays: num(process.env.TREG_VERIFY_RECHECK_DAYS, 90),
+    // передавать ли ссылки LinkedIn: тогда Treg берёт и провайдеров, которые парсят LinkedIn (дешевле,
+    // но против правил LinkedIn); по умолчанию ищем только по имени и домену
+    useLinkedIn: (process.env.TREG_USE_LINKEDIN ?? '').trim() === '1',
   },
 
   llm: {

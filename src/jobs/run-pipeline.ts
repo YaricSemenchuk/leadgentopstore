@@ -6,16 +6,19 @@ import { pgChartCache } from '../apple/chart-cache.js';
 import { lookupPublishers, lookupWithFallback } from '../apple/lookup.js';
 import { buildCandidates, heuristicSignals, priorityScore, type Candidate } from '../pipeline/aggregate.js';
 import { llmErrorText, qualifyCandidate } from '../llm/qualify.js';
-import { developerDomains, enrichCompanyContacts, finalizeEmails } from '../contacts/company.js';
-import { isFreeMailDomain, type CompanyEmails } from '../contacts/emails.js';
-import { hunterDomainSearch, HunterError } from '../contacts/hunter.js';
-import { findLinkedIn, SearchApiError } from '../contacts/people-search.js';
+import { companyDomain, enrichCompanyContacts, finalizeEmails, mailDomains } from '../contacts/company.js';
+import type { CompanyEmails, EmailCheck, EmailStatus, FoundEmail } from '../contacts/emails.js';
+import { hunterDomainSearch, hunterEnabled, HunterError } from '../contacts/hunter.js';
+import { nameParts } from '../contacts/names.js';
+import { findLinkedIn, searchEnabled, SearchApiError } from '../contacts/people-search.js';
+import { startTregBudget, tregBudget, tregEnrichCompany, TregError, tregFindEmail, tregVerifyEmail } from '../contacts/treg.js';
 import {
   hideExcludedPublishers, initSchema, leadsForRescore, pool, recentlyQualified, refreshSignals, saveQualification, upsertLead,
 } from '../db/pool.js';
 import {
-  companiesNeedingContacts, companiesNeedingHunter, companiesNeedingLinkedIn, emailInputs, saveCompanyContacts,
-  saveCompanyEmails, saveHunter, saveLinkedIn, savePortfolio,
+  companiesNeedingContacts, companiesNeedingHunter, companiesNeedingLinkedIn, companiesNeedingSize, companiesWithEmails,
+  companiesWithPeople, emailInputs, saveCompanyContacts, saveCompanyEmails, saveEmailChecks, saveHunter, saveLinkedIn,
+  savePortfolio, saveTregCompany, saveTregLookups, type TregLookup,
 } from '../db/companies.js';
 import { getParseSettings, type ParseSettings } from '../settings.js';
 
@@ -58,6 +61,7 @@ export interface PipelineResult {
   failedCharts: string[];
   linkedin?: LinkedInSearchResult;
   hunter?: HunterRunResult;
+  treg?: TregRunResult;
 }
 
 export interface LinkedInSearchResult {
@@ -72,6 +76,21 @@ export interface LinkedInSearchResult {
 export interface HunterRunResult {
   searched: number;
   emails: number;
+  error?: string;
+  skipped?: string;
+}
+
+/** Итог шагов Treg за прогон; spentUsd — всё, что списал Treg (вместе с Hunter и Serper через него). */
+export interface TregRunResult {
+  spentUsd: number;
+  calls: number;
+  sizeChecked: number;       // компаний, у которых искали размер
+  sized: number;             // из них размер нашёлся
+  peopleSearched: number;    // людей, чью почту искали
+  emailsFound: number;       // из них почта нашлась на домене компании
+  verified: number;          // адресов проверено
+  valid: number;
+  invalid: number;
   error?: string;
   skipped?: string;
 }
@@ -96,7 +115,7 @@ async function refreshEmails(companyId: number): Promise<CompanyEmails | null> {
  * прогон при этом не падает: почта и остальное уже собраны.
  */
 export async function runLinkedInSearch(report: Report = silent): Promise<LinkedInSearchResult> {
-  if (!config.search.apiKey) return { searched: 0, companies: 0, people: 0, skipped: 'SERPER_API_KEY не задан' };
+  if (!searchEnabled()) return { searched: 0, companies: 0, people: 0, skipped: 'SERPER_API_KEY и TREG_TOKEN не заданы' };
   const targets = await companiesNeedingLinkedIn(config.search.maxPerRun);
   if (targets.length === 0) return { searched: 0, companies: 0, people: 0, sized: 0 };
   console.log(`  LinkedIn: ищу для ${targets.length} компаний`);
@@ -137,16 +156,16 @@ export async function runLinkedInSearch(report: Report = silent): Promise<Linked
   return result;
 }
 
-/** Hunter.io для целевых компаний со своим доменом: личная почта сотрудников, шаблон, размер. Без ключа — пропуск. */
+/**
+ * Hunter.io для целевых компаний со своим доменом: личная почта сотрудников, шаблон, размер.
+ * Свой ключ или через Treg; без обоих — пропуск. Сначала компании, у которых личной почты нет.
+ */
 export async function runHunter(report: Report = silent): Promise<HunterRunResult> {
-  if (!config.hunter.apiKey) return { searched: 0, emails: 0, skipped: 'HUNTER_API_KEY не задан' };
+  if (!hunterEnabled()) return { searched: 0, emails: 0, skipped: 'HUNTER_API_KEY и TREG_TOKEN не заданы' };
   const targets = await companiesNeedingHunter(config.hunter.maxPerRun);
   const result: HunterRunResult = { searched: 0, emails: 0 };
   for (const t of targets) {
-    const emailDomain = t.email?.split('@')[1];
-    const domain =
-      developerDomains([t.website, t.supportUrl, t.privacyUrl])[0] ??
-      (emailDomain && !isFreeMailDomain(emailDomain) ? emailDomain : null);
+    const domain = companyDomain([t.website, t.supportUrl, t.privacyUrl], t.email);
     try {
       if (!domain) {
         await saveHunter(t.id, null, null);
@@ -170,6 +189,190 @@ export async function runHunter(report: Report = silent): Promise<HunterRunResul
   return result;
 }
 
+const isFatal = (e: unknown) => (e instanceof TregError && e.fatal) || ((e instanceof HunterError || e instanceof SearchApiError) && e.fatal);
+
+/** Размер компаний без размера: treg.companies.enrich по домену (и сверенной странице LinkedIn). */
+async function tregSizes(result: TregRunResult, stop: { reason: string | null }, report: Report): Promise<void> {
+  const targets = await companiesNeedingSize(config.treg.sizeMaxPerRun);
+  if (targets.length === 0) return;
+  const gate = pLimit(3);
+  await Promise.all(
+    targets.map((t) =>
+      gate(async () => {
+        if (stop.reason) return;
+        const domain = companyDomain([t.website, t.supportUrl, t.privacyUrl], t.email);
+        try {
+          if (!domain) {
+            await saveTregCompany(t.id, null);
+            return;
+          }
+          const { result: r } = await tregEnrichCompany(domain, t.linkedinUrl);
+          await saveTregCompany(t.id, r);
+          result.sizeChecked++;
+          if (r?.size) result.sized++;
+        } catch (e) {
+          // нефатальный сбой — компания не помечается проверенной, следующий прогон попробует снова
+          if (isFatal(e)) stop.reason ??= (e as Error).message;
+          console.warn(`  ⚠ Treg размер ${domain}: ${(e as Error).message}`);
+        }
+        report(`Treg: размер ${result.sizeChecked}/${targets.length}, нашёлся у ${result.sized} · $${tregBudget().spentUsd.toFixed(3)}`);
+      }),
+    ),
+  );
+}
+
+/**
+ * Проверка ящиков: личные адреса (и угаданные по шаблону) и тот, кому писать первым. Несуществующие
+ * выпадают из почты компании, угаданный и подтверждённый становится обычным личным адресом.
+ */
+async function tregVerify(result: TregRunResult, stop: { reason: string | null }, report: Report): Promise<void> {
+  const recheckMs = config.treg.verifyRecheckDays * 86_400_000;
+  const companies = await companiesWithEmails(3000);
+  const jobs: Array<{ id: number; emails: string[] }> = [];
+  let total = 0;
+  for (const c of companies) {
+    if (total >= config.treg.verifyMaxPerRun) break;
+    const wanted = new Set(c.emails.filter((e) => e.kind === 'personal' || e.email === c.best).map((e) => e.email));
+    const due = [...wanted].filter((email) => {
+      const prev = c.checks[email];
+      return !prev || Date.now() - Date.parse(prev.at) > recheckMs;
+    }).slice(0, config.treg.verifyMaxPerRun - total);
+    if (due.length) {
+      jobs.push({ id: c.id, emails: due });
+      total += due.length;
+    }
+  }
+  if (total === 0) return;
+  const gate = pLimit(3);
+  let done = 0;
+  await Promise.all(
+    jobs.map((j) =>
+      gate(async () => {
+        const checks: Record<string, EmailCheck> = {};
+        for (const email of j.emails) {
+          if (stop.reason) break;
+          try {
+            const r = await tregVerifyEmail(email);
+            const status = (r.status ?? 'unknown') as EmailStatus;
+            checks[email] = { status, at: new Date().toISOString(), by: r.servedBy };
+            result.verified++;
+            if (status === 'valid') result.valid++;
+            if (status === 'invalid') result.invalid++;
+          } catch (e) {
+            if (isFatal(e)) stop.reason ??= (e as Error).message;
+            console.warn(`  ⚠ Treg проверка ${email}: ${(e as Error).message}`);
+          }
+          report(`Treg: проверено ${++done}/${total}, действующих ${result.valid}, несуществующих ${result.invalid} · $${tregBudget().spentUsd.toFixed(3)}`);
+        }
+        if (Object.keys(checks).length) {
+          await saveEmailChecks(j.id, checks);
+          await refreshEmails(j.id);
+        }
+      }),
+    ),
+  );
+}
+
+/**
+ * Почта людей из LinkedIn, у которых её нет: treg.people.email.find по имени, домену и профилю,
+ * с проверкой ящика в том же вызове. Каждого человека ищем один раз — повторный поиск платный.
+ */
+async function tregFindPeople(result: TregRunResult, stop: { reason: string | null }, report: Report): Promise<void> {
+  const companies = await companiesWithPeople(2000);
+  const jobs: Array<{
+    c: (typeof companies)[number]; domains: string[]; people: Array<{ name: string; title: string | null; url: string | null }>;
+  }> = [];
+  let total = 0;
+  for (const c of companies) {
+    if (total >= config.treg.findMaxPerRun) break;
+    const domains = mailDomains(c.emails, [c.website, c.supportUrl, c.privacyUrl]);
+    if (domains.length === 0) continue;
+    const haveReal = new Set(c.emails.filter((e) => e.kind === 'personal' && !e.guessed && e.person).map((e) => e.person));
+    const tried = new Set(c.lookups.map((l) => l.person));
+    const people = c.people
+      .filter((p) => p.name && !haveReal.has(p.name) && !tried.has(p.name))
+      // провайдерам нужно имя с фамилией (или профиль, если ссылки LinkedIn разрешены)
+      .filter((p) => !!nameParts(p.name)?.last || (config.treg.useLinkedIn && !!p.url))
+      .slice(0, config.treg.findMaxPerRun - total);
+    if (people.length) {
+      jobs.push({ c, domains, people });
+      total += people.length;
+    }
+  }
+  if (total === 0) return;
+  const gate = pLimit(3);
+  let done = 0;
+  await Promise.all(
+    jobs.map(({ c, domains, people }) =>
+      gate(async () => {
+        const lookups: TregLookup[] = [...c.lookups];
+        const found: FoundEmail[] = [...c.tregEmails];
+        const checks: Record<string, EmailCheck> = {};
+        let changed = false;
+        for (const p of people) {
+          if (stop.reason) break;
+          try {
+            const r = await tregFindEmail({ domain: domains[0], domains, fullName: p.name, linkedinUrl: p.url });
+            const at = new Date().toISOString();
+            lookups.push({
+              person: p.name, email: r.email, status: r.status, by: r.servedBy, at,
+              ...(r.foreign ? { note: 'foreign' } : r.pending ? { note: 'pending' } : {}),
+            });
+            changed = true;
+            result.peopleSearched++;
+            if (r.email) {
+              if (r.status) checks[r.email] = { status: r.status as EmailStatus, at, by: r.servedBy };
+              if (r.status !== 'invalid') {
+                found.push({ email: r.email, source: 'treg', person: p.name, title: p.title });
+                result.emailsFound++;
+              }
+            }
+          } catch (e) {
+            if (isFatal(e)) stop.reason ??= (e as Error).message;
+            console.warn(`  ⚠ Treg почта ${p.name} (${domains[0]}): ${(e as Error).message}`);
+          }
+          report(`Treg: почта людей ${++done}/${total}, нашлась у ${result.emailsFound} · $${tregBudget().spentUsd.toFixed(3)}`);
+        }
+        if (!changed) return;
+        await saveTregLookups(c.id, lookups, found);
+        if (Object.keys(checks).length) await saveEmailChecks(c.id, checks);
+        await refreshEmails(c.id);
+      }),
+    ),
+  );
+}
+
+/**
+ * Treg для целевых компаний (затем под вопросом): размер по домену, проверка адресов, почта людей из
+ * LinkedIn. Без TREG_TOKEN — пропуск. Кончился баланс или бюджет прогона — шаги останавливаются,
+ * прогон не падает.
+ */
+export async function runTreg(report: Report = silent): Promise<TregRunResult> {
+  const zero = { spentUsd: 0, calls: 0, sizeChecked: 0, sized: 0, peopleSearched: 0, emailsFound: 0, verified: 0, valid: 0, invalid: 0 };
+  if (!config.treg.token) {
+    console.log('  Treg: пропуск — TREG_TOKEN не задан');
+    return { ...zero, skipped: 'TREG_TOKEN не задан' };
+  }
+  const result: TregRunResult = { ...zero };
+  const stop = { reason: null as string | null };
+  // размер нужен фильтру «от 50 сотрудников»; проверка до поиска — угаданный по шаблону адрес дешевле проверить, чем искать;
+  // вторая проверка — новые адреса: найденные поиском и те, что стали первыми вместо несуществующих
+  for (const step of [tregSizes, tregVerify, tregFindPeople, tregVerify]) {
+    if (stop.reason) break;
+    await step(result, stop, report);
+  }
+  const b = tregBudget();
+  result.spentUsd = Math.round(b.spentUsd * 10_000) / 10_000;
+  result.calls = b.calls;
+  if (stop.reason) result.error = stop.reason;
+  console.log(
+    `  Treg: размер у ${result.sized} из ${result.sizeChecked}, почта у ${result.emailsFound} из ${result.peopleSearched} людей, ` +
+      `проверено ${result.verified} (действующих ${result.valid}, несуществующих ${result.invalid}), потрачено $${result.spentUsd} за ${result.calls} вызовов` +
+      (result.error ? ` — остановлено: ${result.error}` : ''),
+  );
+  return result;
+}
+
 /** Все приложения компаний в App Store — пачками по 20 издателей за запрос (iTunes Lookup лимитирован). */
 async function fillPortfolios(artistIds: number[], report: Report): Promise<void> {
   if (artistIds.length === 0) return;
@@ -185,6 +388,7 @@ export interface CompaniesResult {
   linkedinSite: number;
   linkedin: LinkedInSearchResult;
   hunter: HunterRunResult;
+  treg: TregRunResult;
 }
 
 /**
@@ -192,6 +396,7 @@ export interface CompaniesResult {
  * (или давно), — сторы и сайт; затем LinkedIn (люди и размер) и Hunter, у каждого свой лимит.
  */
 export async function runCompanies(report: Report = silent): Promise<CompaniesResult> {
+  startTregBudget();   // потолок расходов Treg — на весь прогон: Serper, Hunter и шаги Treg
   const targets = await companiesNeedingContacts(config.contacts.recheckDays);
   const result = { checked: 0, withEmail: 0, withPersonal: 0, linkedinSite: 0 };
   if (targets.length) {
@@ -221,10 +426,11 @@ export async function runCompanies(report: Report = silent): Promise<CompaniesRe
   }
   const linkedin = await runLinkedInSearch(report);
   const hunter = await runHunter(report);
+  const treg = await runTreg(report);
   // правила разбора почты могли поменяться — пересобираем у всех проверенных компаний (без сети)
   report('пересборка почты компаний');
   await refreshAllEmails();
-  return { ...result, linkedin, hunter };
+  return { ...result, linkedin, hunter, treg };
 }
 
 /** Пересобирает почту всех проверенных компаний из сохранённых данных: после правки правил личная/общая. */
@@ -398,19 +604,21 @@ export async function runPipeline({ dryRun = false, settings, report = silent }:
   return {
     scanned: candidates.length, targets: targets.length, qualified: toQualify.length, saved,
     contactsChecked: companies.checked, contactsFound: companies.withEmail, personalFound: companies.withPersonal,
-    llmErrors: failedLlm, failedCharts: failed, linkedin: companies.linkedin, hunter: companies.hunter,
+    llmErrors: failedLlm, failedCharts: failed, linkedin: companies.linkedin, hunter: companies.hunter, treg: companies.treg,
   };
 }
 
-// Прямой запуск: npm run ingest [-- --dry-run | --contacts-only | --linkedin | --hunter | --refresh-emails | --rescore | --rescore-all]
+// Прямой запуск: npm run ingest [-- --dry-run | --contacts-only | --linkedin | --hunter | --treg | --refresh-emails | --rescore | --rescore-all]
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const arg = (flag: string) => process.argv.includes(flag);
   try {
     // схема нужна и dry run'у: он пишет только в кэш чартов
     if (config.databaseUrl) await initSchema();
+    startTregBudget();
     if (arg('--contacts-only')) await runCompanies();
     else if (arg('--linkedin')) await runLinkedInSearch();
     else if (arg('--hunter')) await runHunter();
+    else if (arg('--treg')) await runTreg();
     else if (arg('--refresh-emails')) console.log(`  почта пересобрана у ${await refreshAllEmails()} компаний`);
     else if (arg('--rescore') || arg('--rescore-all')) await runRescore({ all: arg('--rescore-all') });
     else await runPipeline({ dryRun: arg('--dry-run') });

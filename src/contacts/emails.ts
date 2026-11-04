@@ -13,16 +13,27 @@ export type EmailSource =
   | 'support_page'
   | 'privacy_policy'
   | 'website'
-  | 'hunter';
+  | 'hunter'
+  | 'treg'               // поиск по имени и домену через Treg (только на домене компании)
+  | 'pattern';           // составлен по шаблону домена и подтверждён проверкой ящика
 
-const STORE_SOURCES = new Set<EmailSource>(['google_play', 'play_developer', 'app_store_trader', 'hunter']);
+const STORE_SOURCES = new Set<EmailSource>(['google_play', 'play_developer', 'app_store_trader', 'hunter', 'treg']);
 
 export interface FoundEmail {
   email: string;
   source: EmailSource;
-  /** имя и должность, если источник их знает (Hunter) */
+  /** имя и должность, если источник их знает (Hunter, Treg) */
   person?: string | null;
   title?: string | null;
+}
+
+/** Проверка ящика: valid — принимает почту, invalid — не существует, accept_all — домен принимает всё. */
+export type EmailStatus = 'valid' | 'invalid' | 'accept_all' | 'unknown';
+
+export interface EmailCheck {
+  status: EmailStatus;
+  at: string;               // ISO-дата проверки
+  by?: string | null;       // провайдер, который проверил
 }
 
 /** personal — адрес конкретного человека; role — общий ящик (support@, info@, studio@). */
@@ -36,6 +47,7 @@ export interface CompanyEmail {
   person: string | null;     // чей адрес, если известно
   title: string | null;
   guessed: boolean;          // составлен по шаблону домена, не проверен
+  status?: EmailStatus | null; // проверка ящика, если была
 }
 
 export interface Person {
@@ -243,8 +255,19 @@ export interface CompanyEmails {
  * привязывает личные к людям из LinkedIn/Hunter, выводит шаблон домена и составляет по нему
  * адреса остальных людей (guessed). Первым идёт тот, кому писать: руководитель → человек →
  * партнёрский/маркетинговый ящик → контакт → поддержка → юридический.
+ *
+ * checks — проверки ящиков: несуществующие адреса выбрасываются, проверенные идут выше, а
+ * угаданный по шаблону адрес, который проверка подтвердила (valid), становится обычным личным.
  */
-export function buildCompanyEmails(found: FoundEmail[], ctx: EmailContext, knownPattern: EmailPattern | null = null): CompanyEmails {
+export function buildCompanyEmails(
+  found: FoundEmail[],
+  ctx: EmailContext,
+  knownPattern: EmailPattern | null = null,
+  checks: Record<string, EmailCheck> = {},
+): CompanyEmails {
+  const statusOf = (email: string): EmailStatus | null => checks[email]?.status ?? null;
+  // поле status — только у проверенных адресов
+  const withStatus = (status: EmailStatus | null) => (status ? { status } : {});
   const domains = new Set(ctx.domains.filter(Boolean).map(baseDomain));
   // домены из адресов, которые дал сам разработчик в сторе, — тоже его
   for (const f of found) {
@@ -262,6 +285,8 @@ export function buildCompanyEmails(found: FoundEmail[], ctx: EmailContext, known
   const byEmail = new Map<string, CompanyEmail & { score: number }>();
   let pattern = knownPattern;
   for (const f of found) {
+    // ящика не существует — писать некуда, кто бы его ни опубликовал
+    if (statusOf(f.email) === 'invalid') continue;
     const [local, domain] = f.email.split('@');
     const free = isFreeMailDomain(domain);
     const sameDomain = domains.has(baseDomain(domain));
@@ -269,12 +294,16 @@ export function buildCompanyEmails(found: FoundEmail[], ctx: EmailContext, known
     const role = roleScore(local);
     // со страниц: только домен разработчика или ролевой адрес (юрфирмы и регуляторы из политик — мимо)
     if (!STORE_SOURCES.has(f.source) && !sameDomain && (role === null || role <= 0)) continue;
-    const owner = f.person ? { name: f.person, title: f.title ?? null, pattern: null } : kind === 'personal' ? ownerOf(local, people) : null;
+    // адрес с известным владельцем (Hunter, Treg) тоже даёт шаблон домена: emre.kaya@ у Emre Kaya → {first}.{last}
+    const ownParts = f.person ? nameParts(f.person) : null;
+    const owner = f.person
+      ? { name: f.person, title: f.title ?? null, pattern: ownParts ? matchPattern(local, ownParts) : null }
+      : kind === 'personal' ? ownerOf(local, people) : null;
     if (owner?.pattern && sameDomain && !free) pattern ??= { pattern: owner.pattern, domain };
     const decision = owner?.title ? /\b(ceo|founder|co-?founder|owner|president|chief|cmo|coo|managing director|general manager)\b/i.test(owner.title) : DECISION_LOCAL.test(local);
     const score =
       (kind === 'personal' ? 10 + (decision ? 3 : 0) + (owner ? 1 : 0) - (free && !ctx.individual ? 4 : 0) : role ?? 0) +
-      (STORE_SOURCES.has(f.source) ? 1 : 0) + (sameDomain ? 1 : 0);
+      (STORE_SOURCES.has(f.source) ? 1 : 0) + (sameDomain ? 1 : 0) + (statusOf(f.email) === 'valid' ? 1 : 0);
     const prev = byEmail.get(f.email);
     if (prev) {
       if (!prev.sources.includes(f.source)) prev.sources.push(f.source);
@@ -284,25 +313,37 @@ export function buildCompanyEmails(found: FoundEmail[], ctx: EmailContext, known
       continue;
     }
     byEmail.set(f.email, {
-      email: f.email, kind, free, sources: [f.source], person: owner?.name ?? null, title: owner?.title ?? null, guessed: false, score,
+      email: f.email, kind, free, sources: [f.source], person: owner?.name ?? null, title: owner?.title ?? null, guessed: false,
+      ...withStatus(statusOf(f.email)), score,
     });
   }
 
-  const real = [...byEmail.values()].sort((a, b) => b.score - a.score);
   // адреса людей без почты — по шаблону, на том домене, где шаблон подтвердился
   const guessed: CompanyEmail[] = [];
   if (pattern && !ctx.individual) {
-    const taken = new Set(real.map((e) => e.person).filter(Boolean));
+    const taken = new Set([...byEmail.values()].map((e) => e.person).filter(Boolean));
     for (const p of people) {
       if (taken.has(p.name)) continue;
       const local = renderPattern(pattern.pattern, p.parts);
       if (!local) continue;
       const email = `${local}@${pattern.domain}`;
       if (byEmail.has(email) || guessed.some((g) => g.email === email)) continue;
-      guessed.push({ email, kind: 'personal', free: false, sources: [], person: p.name, title: p.title, guessed: true });
+      const status = statusOf(email);
+      if (status === 'invalid') continue;
+      if (status === 'valid') {
+        // проверка подтвердила ящик — это уже не догадка
+        const decision = p.title ? /\b(ceo|founder|co-?founder|owner|president|chief|cmo|coo|managing director|general manager)\b/i.test(p.title) : false;
+        byEmail.set(email, {
+          email, kind: 'personal', free: false, sources: ['pattern'], person: p.name, title: p.title, guessed: false,
+          status, score: 10 + (decision ? 3 : 0) + 1 + 1 + 1,
+        });
+        continue;
+      }
+      guessed.push({ email, kind: 'personal', free: false, sources: [], person: p.name, title: p.title, guessed: true, ...withStatus(status) });
     }
   }
 
+  const real = [...byEmail.values()].sort((a, b) => b.score - a.score);
   const emails: CompanyEmail[] = [...real.map(({ score: _s, ...e }) => e), ...guessed];
   return { emails, best: emails.find((e) => !e.guessed) ?? null, pattern };
 }

@@ -158,3 +158,11 @@ UPDATE leads l SET company_id = c.id FROM companies c WHERE c.artist_id = l.arti
 
 -- v9: страница компании в LinkedIn сверена с доменом разработчика (с сайта или «Website» в карточке)
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS linkedin_confirmed BOOLEAN;
+
+-- v10: Treg — почта людей по имени и домену, проверка ящиков, размер компании по домену
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS treg_emails       JSONB;        -- [{email, source: 'treg', person, title}]
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS treg_lookups      JSONB;        -- [{person, email, status, by, at}] — кого уже искали (повтор платный)
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS email_checks      JSONB;        -- {адрес: {status, at, by}}
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS treg_company      JSONB;        -- {name, industry, location, founded, by}
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS treg_company_checked_at TIMESTAMPTZ;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS best_email_status TEXT;         -- проверка адреса «кому писать первым»

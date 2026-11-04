@@ -13,8 +13,12 @@ import { linkedinSearchLinks } from './contacts/linkedin.js';
 const app = express();
 
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD ?? '';
-const searchEnabled = !!config.search.apiKey;
-const hunterEnabled = !!config.hunter.apiKey;
+const searchEnabled = !!config.search.apiKey || !!config.treg.token;
+const hunterEnabled = !!config.hunter.apiKey || !!config.treg.token;
+const treg = {
+  enabled: !!config.treg.token, maxUsdPerRun: config.treg.maxUsdPerRun,
+  ownSerper: !!config.search.apiKey, ownHunter: !!config.hunter.apiKey,
+};
 const INGEST_TOKEN = process.env.INGEST_TOKEN ?? '';
 
 function safeEqual(a: string, b: string): boolean {
@@ -261,7 +265,7 @@ app.get('/settings', wrap(async (req, res) => {
   const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
   let flash = FLASH[String(req.query.ok ?? '')];
   if (req.query.started) flash = { kind: 'ok', text: `Сбор #${Number(req.query.started)} запущен — статус обновляется на этой странице.` };
-  res.type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash, searchEnabled, hunterEnabled }));
+  res.type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, flash, searchEnabled, hunterEnabled, treg }));
 }));
 
 app.post('/settings', wrap(async (req, res) => {
@@ -279,7 +283,7 @@ app.post('/settings', wrap(async (req, res) => {
   if (!parsed.success) {
     const text = parsed.error.issues.map((i) => i.message).join('; ');
     const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
-    res.status(400).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, hunterEnabled, flash: { kind: 'bad', text: `Не сохранено: ${text}` } }));
+    res.status(400).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, hunterEnabled, treg, flash: { kind: 'bad', text: `Не сохранено: ${text}` } }));
     return;
   }
   await saveParseSettings(parsed.data);
@@ -293,7 +297,7 @@ app.post('/settings', wrap(async (req, res) => {
     return;
   }
   const runs = await recentRuns();
-  res.status(409).type('html').send(renderSettingsPage({ settings: parsed.data, run: currentRun(), runs, searchEnabled, hunterEnabled, flash: { kind: 'bad', text: `Сохранено, но сбор не запущен: ${r.reason}` } }));
+  res.status(409).type('html').send(renderSettingsPage({ settings: parsed.data, run: currentRun(), runs, searchEnabled, hunterEnabled, treg, flash: { kind: 'bad', text: `Сохранено, но сбор не запущен: ${r.reason}` } }));
 }));
 
 app.post('/runs/contacts', wrap(async (_req, res) => {
@@ -303,7 +307,7 @@ app.post('/runs/contacts', wrap(async (_req, res) => {
     return;
   }
   const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
-  res.status(409).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, hunterEnabled, flash: { kind: 'bad', text: `Не запущено: ${r.reason}` } }));
+  res.status(409).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, hunterEnabled, treg, flash: { kind: 'bad', text: `Не запущено: ${r.reason}` } }));
 }));
 
 app.get('/api/run-status', wrap(async (_req, res) => {

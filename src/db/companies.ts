@@ -1,6 +1,7 @@
 import { pool, TIER_SQL, type LeadView } from './pool.js';
 import { COMPANY_CONTACTS_VERSION, type CompanyContacts, type CompanyInput, type CompanyKind, type EmailInputs } from '../contacts/company.js';
-import type { CompanyEmails, EmailPattern, FoundEmail } from '../contacts/emails.js';
+import type { CompanyEmail, CompanyEmails, EmailCheck, EmailPattern, FoundEmail } from '../contacts/emails.js';
+import type { CompanyEnrich } from '../contacts/treg.js';
 import type { HunterResult } from '../contacts/hunter.js';
 import { LINKEDIN_COMPANY_VERSION, LINKEDIN_SEARCH_VERSION, type LinkedInFound } from '../contacts/people-search.js';
 import type { PublisherStats } from '../apple/lookup.js';
@@ -155,14 +156,14 @@ export interface HunterTarget {
   email: string | null;
 }
 
-/** Компании для Hunter: целевые, затем под вопросом; частные лица — нет (у них нет сотрудников). */
+/** Компании для Hunter: целевые, затем под вопросом, сначала без личной почты; частные лица — нет (у них нет сотрудников). */
 export async function companiesNeedingHunter(limit: number): Promise<HunterTarget[]> {
   const { rows } = await pool.query(
     `SELECT c.id, c.website, c.support_url, c.privacy_url, c.email
      FROM companies c JOIN (${COMPANY_APPS}) a ON a.company_id = c.id
      WHERE a.tier_rank <= 1 AND c.checked_at IS NOT NULL AND c.hunter_checked_at IS NULL
        AND COALESCE(c.kind, 'company') = 'company'
-     ORDER BY a.tier_rank, a.best_fit DESC NULLS LAST
+     ORDER BY a.tier_rank, (c.personal_emails > 0), a.best_fit DESC NULLS LAST
      LIMIT $1`,
     [limit],
   );
@@ -193,7 +194,8 @@ function parsePattern(v: string | null): EmailPattern | null {
 /** Всё, из чего складывается итоговая почта компании. */
 export async function emailInputs(id: number): Promise<EmailInputs | null> {
   const { rows } = await pool.query(
-    `SELECT name, kind, website, support_url, privacy_url, emails_raw, hunter_emails, hunter_pattern, linkedin_people
+    `SELECT name, kind, website, support_url, privacy_url, emails_raw, hunter_emails, hunter_pattern, linkedin_people,
+            treg_emails, email_checks
      FROM companies WHERE id = $1`,
     [id],
   );
@@ -208,18 +210,138 @@ export async function emailInputs(id: number): Promise<EmailInputs | null> {
     emailsRaw: (r.emails_raw ?? []) as FoundEmail[],
     hunterEmails: (r.hunter_emails ?? []) as FoundEmail[],
     hunterPattern: parsePattern(r.hunter_pattern),
+    tregEmails: (r.treg_emails ?? []) as FoundEmail[],
+    checks: (r.email_checks ?? {}) as Record<string, EmailCheck>,
     people: ((r.linkedin_people ?? []) as Array<{ name: string; title: string | null }>).map((p) => ({ name: p.name, title: p.title })),
   };
 }
 
 export async function saveCompanyEmails(id: number, e: CompanyEmails): Promise<void> {
   await pool.query(
-    `UPDATE companies SET emails = $2, email = $3, email_pattern = $4, personal_emails = $5, guessed_emails = $6 WHERE id = $1`,
+    `UPDATE companies SET emails = $2, email = $3, email_pattern = $4, personal_emails = $5, guessed_emails = $6,
+       best_email_status = $7 WHERE id = $1`,
     [
       id, JSON.stringify(e.emails), e.best?.email ?? null, e.pattern ? `${e.pattern.pattern}@${e.pattern.domain}` : null,
       e.emails.filter((x) => x.kind === 'personal' && !x.guessed).length, e.emails.filter((x) => x.guessed).length,
+      e.best?.status ?? null,
     ],
   );
+}
+
+// --- Treg: размер компании, почта людей по имени, проверка ящиков ---
+
+export interface TregCompanyTarget {
+  id: number;
+  website: string | null;
+  supportUrl: string | null;
+  privacyUrl: string | null;
+  email: string | null;
+  linkedinUrl: string | null;     // только сверенная с доменом страница
+}
+
+/** Компании без размера для treg.companies.enrich: целевые, затем под вопросом; частные лица — нет. */
+export async function companiesNeedingSize(limit: number): Promise<TregCompanyTarget[]> {
+  const { rows } = await pool.query(
+    `SELECT c.id, c.website, c.support_url, c.privacy_url, c.email,
+            CASE WHEN c.linkedin_confirmed THEN c.linkedin_url END AS linkedin_url
+     FROM companies c JOIN (${COMPANY_APPS}) a ON a.company_id = c.id
+     WHERE a.tier_rank <= 1 AND c.checked_at IS NOT NULL AND c.employees IS NULL
+       AND c.treg_company_checked_at IS NULL AND COALESCE(c.kind, 'company') = 'company'
+     ORDER BY a.tier_rank, a.best_fit DESC NULLS LAST
+     LIMIT $1`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    id: r.id, website: r.website, supportUrl: r.support_url, privacyUrl: r.privacy_url, email: r.email, linkedinUrl: r.linkedin_url,
+  }));
+}
+
+/** Ответ Treg о компании; размер пишется, только если его ещё нет (LinkedIn и Hunter не дали). */
+export async function saveTregCompany(id: number, r: CompanyEnrich | null): Promise<void> {
+  const size = r?.size ?? null;
+  await pool.query(
+    `UPDATE companies SET
+       treg_company = $2, treg_company_checked_at = now(),
+       employees = CASE WHEN employees IS NULL AND $3::text IS NOT NULL THEN $3 ELSE employees END,
+       employees_min = CASE WHEN employees IS NULL AND $3::text IS NOT NULL THEN $4 ELSE employees_min END,
+       employees_source = CASE WHEN employees IS NULL AND $3::text IS NOT NULL THEN 'treg' ELSE employees_source END
+     WHERE id = $1`,
+    [
+      id,
+      r ? JSON.stringify({ name: r.name, industry: r.industry, location: r.location, founded: r.founded, by: r.servedBy, foreign: r.foreign }) : null,
+      size?.range ?? null, size?.min ?? null,
+    ],
+  );
+}
+
+export interface TregLookup {
+  person: string;
+  email: string | null;
+  status: string | null;
+  by: string | null;
+  at: string;
+  note?: string;          // foreign — нашёлся адрес на чужом домене; pending — провайдер не успел
+}
+
+export interface EmailFindTarget {
+  id: number;
+  website: string | null;
+  supportUrl: string | null;
+  privacyUrl: string | null;
+  email: string | null;
+  people: Array<{ name: string; title: string | null; url: string | null }>;
+  emails: CompanyEmail[];
+  lookups: TregLookup[];
+  tregEmails: FoundEmail[];
+}
+
+/** Компании с людьми из LinkedIn для поиска их почты; кому именно искать — решает прогон. */
+export async function companiesWithPeople(limit: number): Promise<EmailFindTarget[]> {
+  const { rows } = await pool.query(
+    `SELECT c.id, c.website, c.support_url, c.privacy_url, c.email, c.linkedin_people, c.emails, c.treg_lookups, c.treg_emails
+     FROM companies c JOIN (${COMPANY_APPS}) a ON a.company_id = c.id
+     WHERE a.tier_rank <= 1 AND c.checked_at IS NOT NULL AND ${HAS_PEOPLE} AND COALESCE(c.kind, 'company') = 'company'
+     ORDER BY a.tier_rank, a.best_fit DESC NULLS LAST
+     LIMIT $1`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    id: r.id, website: r.website, supportUrl: r.support_url, privacyUrl: r.privacy_url, email: r.email,
+    people: r.linkedin_people ?? [], emails: r.emails ?? [], lookups: r.treg_lookups ?? [], tregEmails: r.treg_emails ?? [],
+  }));
+}
+
+export async function saveTregLookups(id: number, lookups: TregLookup[], tregEmails: FoundEmail[]): Promise<void> {
+  await pool.query(`UPDATE companies SET treg_lookups = $2, treg_emails = $3 WHERE id = $1`, [
+    id, JSON.stringify(lookups), JSON.stringify(tregEmails),
+  ]);
+}
+
+export interface EmailCheckTarget {
+  id: number;
+  best: string | null;
+  emails: CompanyEmail[];
+  checks: Record<string, EmailCheck>;
+}
+
+/** Компании с почтой (целевые, затем под вопросом) — какие адреса проверять, решает прогон. */
+export async function companiesWithEmails(limit: number): Promise<EmailCheckTarget[]> {
+  const { rows } = await pool.query(
+    `SELECT c.id, c.email, c.emails, c.email_checks
+     FROM companies c JOIN (${COMPANY_APPS}) a ON a.company_id = c.id
+     WHERE a.tier_rank <= 1 AND c.checked_at IS NOT NULL AND jsonb_array_length(COALESCE(c.emails, '[]'::jsonb)) > 0
+     ORDER BY a.tier_rank, a.best_fit DESC NULLS LAST
+     LIMIT $1`,
+    [limit],
+  );
+  return rows.map((r) => ({ id: r.id, best: r.email, emails: r.emails ?? [], checks: r.email_checks ?? {} }));
+}
+
+/** Новые проверки дописываются к старым (адрес → статус). */
+export async function saveEmailChecks(id: number, checks: Record<string, EmailCheck>): Promise<void> {
+  await pool.query(`UPDATE companies SET email_checks = COALESCE(email_checks, '{}'::jsonb) || $2::jsonb WHERE id = $1`, [
+    id, JSON.stringify(checks),
+  ]);
 }
 
 // --- Вид «Компании» ---
@@ -291,6 +413,8 @@ export async function companyStats() {
             count(*) FILTER (WHERE a.tier_rank = 0 AND c.email IS NOT NULL)::int AS target_with_email,
             count(*) FILTER (WHERE a.tier_rank = 0 AND c.personal_emails > 0)::int AS target_with_personal,
             count(*) FILTER (WHERE a.tier_rank = 0 AND c.employees_min >= 51)::int AS target_50,
+            count(*) FILTER (WHERE a.tier_rank = 0 AND (c.employees IS NOT NULL OR c.kind = 'individual'))::int AS target_sized,
+            count(*) FILTER (WHERE a.tier_rank = 0 AND c.best_email_status = 'valid')::int AS target_best_valid,
             count(*) FILTER (WHERE a.tier_rank <= 1 AND c.employees_min >= 51)::int AS active_50,
             count(*) FILTER (WHERE a.tier_rank = 0 AND c.android_apps > 0)::int AS target_on_play,
             count(*) FILTER (WHERE a.tier_rank = 0 AND (c.linkedin_url IS NOT NULL OR ${HAS_PEOPLE}))::int AS target_with_linkedin,
@@ -303,6 +427,7 @@ export async function companyStats() {
   );
   return rows[0] as {
     target: number; target_with_email: number; target_with_personal: number; target_50: number; active_50: number;
+    target_sized: number; target_best_valid: number;
     target_on_play: number; target_with_linkedin: number; target_verified: number; maybe: number; skip: number;
     unchecked: number; target_apps: number;
   };
