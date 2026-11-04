@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  normalizeVerdict, parseCompanyEnrich, parseEmailFind, parseEmployees, parseVerify, startTregBudget, tregCall, TregBudget, TregError,
+  normalizeVerdict, parseEmailFind, parseEmployees, parseVerify, SIZE_PROVIDERS, startTregBudget, toCompanyEnrich, tregCall,
+  tregCompanySize, TregBudget, TregError,
 } from './treg.js';
 import { buildCompanyEmails } from './emails.js';
 
@@ -22,24 +23,45 @@ test('Treg: размер компании в разных записях', () =>
   assert.equal(parseEmployees('500-50'), null);
 });
 
-test('Treg: компания на нашем домене — размер берём, на чужом — нет', () => {
-  const ours = parseCompanyEnrich(
-    { output: { name: 'Fuse Games', domain: 'fusegames.io', employees: '51-200', industry: 'Games' }, _treg: { served_by: 'leadocean', domain_match: true } },
-    'fusegames.io',
-  );
-  assert.deepEqual(ours?.size, { range: '51-200', min: 51 });
-  assert.equal(ours?.servedBy, 'leadocean');
-  assert.equal(ours?.foreign, false);
+test('Treg: размер из ответов провайдеров; на чужом домене не берём', () => {
+  const [leadocean, tca, hunter] = SIZE_PROVIDERS;
+  const lo = toCompanyEnrich(leadocean.parse({ data: { company_data: { company_name: 'Fuse Games', company_domain: 'fusegames.io', company_employees: 64 } } })!, 'fusegames.io', leadocean.id);
+  assert.deepEqual(lo.size, { range: '64', min: 64 });
+  const t = toCompanyEnrich(tca.parse({ about: { name: 'Fuse', totalEmployees: '51-200', totalEmployeesExact: 120 }, domain: { domain: 'fusegames.io' } })!, 'fusegames.io', tca.id);
+  assert.deepEqual(t.size, { range: '51-200', min: 51 });
+  const h = toCompanyEnrich(hunter.parse({ data: { name: 'Fuse', domain: 'www.fusegames.io', metrics: { employees: '10K-50K' }, linkedin: { handle: 'company/fuse' } } })!, 'fusegames.io', hunter.id);
+  assert.deepEqual(h.size, { range: '10000-50000', min: 10000 });
+  assert.equal(h.linkedinUrl, 'https://www.linkedin.com/company/fuse');
+  const other = toCompanyEnrich(tca.parse({ about: { name: 'Fuse Bank', totalEmployees: '5k-10k' }, domain: { domain: 'fusebank.com' } })!, 'fusegames.io', tca.id);
+  assert.equal(other.size, null);
+  assert.equal(other.foreign, true);
+  // компании нет
+  assert.equal(leadocean.parse({ data: {} }), null);
+  assert.equal(tca.parse({}), null);
+  assert.equal(hunter.parse({ errors: [] }), null);
+});
 
-  const www = parseCompanyEnrich({ output: { name: 'Fuse', website: 'https://www.fusegames.io/', employees: 70 } }, 'fusegames.io');
-  assert.deepEqual(www?.size, { range: '70', min: 70 });
-
-  const other = parseCompanyEnrich({ output: { name: 'Fuse Bank', domain: 'fusebank.com', employees: '5001-10000' } }, 'fusegames.io');
-  assert.equal(other?.size, null);
-  assert.equal(other?.foreign, true);
-
-  assert.equal(parseCompanyEnrich({ output: { name: null } }, 'fusegames.io'), null);
-  assert.equal(parseCompanyEnrich('<html>', 'fusegames.io'), null);
+test('Treg: размер — провайдеры по очереди до первого ответа с численностью, 404 бесплатный и не ошибка', async () => {
+  startTregBudget(1);
+  const seen: string[] = [];
+  const replies: Record<string, { status: number; body: unknown; cost?: string }> = {
+    'leadocean.companies.enrich': { status: 404, body: { error: 'not found' } },
+    // нашлась, но без численности — платим и идём дальше
+    'thecompaniesapi.companies.enrich': { status: 200, body: { about: { name: 'Fuse' }, domain: { domain: 'fusegames.io' } }, cost: '1900' },
+    'hunter.companies.enrich': { status: 200, body: { data: { name: 'Fuse', domain: 'fusegames.io', metrics: { employees: '11-50' } } }, cost: '4900' },
+  };
+  const f = (async (url: string | URL) => {
+    const id = new URL(String(url)).pathname.replace('/call/', '');
+    seen.push(String(url));
+    const r = replies[id];
+    return new Response(JSON.stringify(r.body), { status: r.status, headers: { 'x-treg-cost-micro': r.cost ?? '0' } });
+  }) as typeof fetch;
+  const { result, costUsd } = await tregCompanySize('fusegames.io', 't', f);
+  assert.deepEqual(result?.size, { range: '11-50', min: 11 });
+  assert.equal(result?.servedBy, 'hunter.companies.enrich');
+  assert.equal(Math.round(costUsd * 1e6), 6800);
+  assert.equal(seen.length, 3);
+  assert.equal(seen[1], 'https://treg.to/call/thecompaniesapi.companies.enrich?domain=fusegames.io');
 });
 
 test('Treg: почта по имени — только на домене компании, вердикт проверки Treg важнее отметки провайдера', () => {

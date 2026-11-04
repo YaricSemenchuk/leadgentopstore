@@ -11,7 +11,7 @@ import type { CompanyEmails, EmailCheck, EmailStatus, FoundEmail } from '../cont
 import { hunterDomainSearch, hunterEnabled, HunterError } from '../contacts/hunter.js';
 import { nameParts } from '../contacts/names.js';
 import { findLinkedIn, searchEnabled, SearchApiError } from '../contacts/people-search.js';
-import { startTregBudget, tregBudget, tregEnrichCompany, TregError, tregFindEmail, tregVerifyEmail } from '../contacts/treg.js';
+import { startTregBudget, tregBudget, tregCompanySize, TregError, tregFindEmail, tregVerifyEmail } from '../contacts/treg.js';
 import {
   hideExcludedPublishers, initSchema, leadsForRescore, pool, recentlyQualified, refreshSignals, saveQualification, upsertLead,
 } from '../db/pool.js';
@@ -191,7 +191,7 @@ export async function runHunter(report: Report = silent): Promise<HunterRunResul
 
 const isFatal = (e: unknown) => (e instanceof TregError && e.fatal) || ((e instanceof HunterError || e instanceof SearchApiError) && e.fatal);
 
-/** Размер компаний без размера: treg.companies.enrich по домену (и сверенной странице LinkedIn). */
+/** Размер компаний без размера: провайдеры с численностью по домену (leadocean → thecompaniesapi → Hunter). */
 async function tregSizes(result: TregRunResult, stop: { reason: string | null }, report: Report): Promise<void> {
   const targets = await companiesNeedingSize(config.treg.sizeMaxPerRun);
   if (targets.length === 0) return;
@@ -206,7 +206,7 @@ async function tregSizes(result: TregRunResult, stop: { reason: string | null },
             await saveTregCompany(t.id, null);
             return;
           }
-          const { result: r } = await tregEnrichCompany(domain, t.linkedinUrl);
+          const { result: r } = await tregCompanySize(domain);
           await saveTregCompany(t.id, r);
           result.sizeChecked++;
           if (r?.size) result.sized++;

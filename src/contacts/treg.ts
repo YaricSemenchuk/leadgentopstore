@@ -79,6 +79,8 @@ export interface TregCall {
   maxCostUsd: number;
   /** дополнительные заголовки X-Treg-Route-* */
   headers?: Record<string, string>;
+  /** статусы провайдера, которые значат «не нашлось» (404) — вернуть, а не бросать ошибку */
+  missStatuses?: number[];
 }
 
 export interface TregResponse {
@@ -163,6 +165,7 @@ export async function tregCall(tool: string, c: TregCall, token = config.treg.to
       const out = { status: res.status, body, costUsd: charged, servedBy: res.headers.get('x-treg-served-by'), callId: res.headers.get('x-treg-call-id') };
 
       if (res.ok) return out;  // 200 и 202 (асинхронный провайдер ещё считает) — решает вызывающий
+      if (!fromTreg && c.missStatuses?.includes(res.status)) return out;
       if (res.status === 401 && fromTreg) throw new TregError(`Treg отклонил токен: ${errorText(body)}`, true, 'auth');
       if (res.status === 402 && code === 'insufficient_balance') {
         throw new TregError('Treg: на балансе не хватает денег — пополни баланс на treg.to', true, code);
@@ -290,7 +293,13 @@ export async function tregVerifyEmail(email: string): Promise<VerifyResult & { c
   return { ...parseVerify(r.body), costUsd: r.costUsd };
 }
 
-// --- Размер компании: treg.companies.enrich ---
+// --- Размер компании: своя цепочка провайдеров ---
+//
+// Маршрут treg.companies.enrich для этого не годится: попаданием он считает любой ответ с названием
+// компании, а первыми отвечают дешёвые провайдеры, которые читают только сайт (название и отрасль,
+// без численности). Treg списывает за такое «попадание» и дальше не идёт. Поэтому идём сами по
+// провайдерам, у которых численность есть, от дешёвого к дорогому, до первого ответа с ней.
+// Промах (404) у всех трёх бесплатный.
 
 export interface CompanyEnrich {
   size: CompanySize | null;
@@ -330,54 +339,119 @@ export function parseEmployees(v: unknown): CompanySize | null {
   return Number.isFinite(one) && one > 0 ? { range: String(one), min: one } : null;
 }
 
-const EnrichBody = z.object({
-  output: z
-    .object({
-      name: z.string().nullish(),
-      domain: z.string().nullish(),
-      website: z.string().nullish(),
-      employees: z.union([z.string(), z.number()]).nullish(),
-      industry: z.string().nullish(),
-      location: z.string().nullish(),
-      founded: z.number().nullish(),
-      linkedin_url: z.string().nullish(),
-    })
-    .nullish(),
-  _treg: z.object({ served_by: z.string().nullish(), domain_match: z.boolean().nullish() }).passthrough().nullish(),
-});
+interface ProviderCompany {
+  name?: string | null;
+  domain?: string | null;
+  employees?: unknown;
+  industry?: string | null;
+  location?: string | null;
+  founded?: number | null;
+  linkedin?: string | null;
+}
 
-/** Ответ treg.companies.enrich; чужой домен в ответе — другая компания, её размер не берём. */
-export function parseCompanyEnrich(body: unknown, domain: string): CompanyEnrich | null {
-  const parsed = EnrichBody.safeParse(body);
-  if (!parsed.success || !parsed.data.output?.name) return null;
-  const o = parsed.data.output;
-  const t = parsed.data._treg;
-  const theirs = o.domain || o.website;
-  let foreign = t?.domain_match === false;
-  if (!foreign && theirs) {
-    try {
-      foreign = baseDomain(theirs.includes('://') ? new URL(theirs).hostname : theirs) !== baseDomain(domain);
-    } catch {
-      /* битый адрес сайта — судим по domain_match */
-    }
+interface SizeProvider {
+  id: string;
+  call: (domain: string) => Pick<TregCall, 'method' | 'body' | 'query'>;
+  maxCostUsd: number;
+  /** ответ провайдера как есть → поля компании; null — компании нет */
+  parse: (body: any) => ProviderCompany | null;
+}
+
+const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+export const SIZE_PROVIDERS: SizeProvider[] = [
+  {
+    // бесплатно; численность — число
+    id: 'leadocean.companies.enrich',
+    call: (domain) => ({ method: 'POST', body: { domain } }),
+    maxCostUsd: 0.005,
+    parse: (b) => {
+      const c = b?.data?.company_data;
+      if (!c) return null;
+      return {
+        name: str(c.company_name), domain: str(c.company_domain) ?? str(c.company_web_address), employees: c.company_employees,
+        location: str(c.company_primary_address?.country),
+      };
+    },
+  },
+  {
+    // ~$0.002 за найденную; диапазон «11-50» и точное число
+    id: 'thecompaniesapi.companies.enrich',
+    call: (domain) => ({ method: 'GET', query: { domain } }),
+    maxCostUsd: 0.005,
+    parse: (b) => {
+      const a = b?.about;
+      if (!a?.name) return null;
+      return {
+        name: str(a.name), domain: str(b?.domain?.domain), employees: a.totalEmployees ?? a.totalEmployeesExact,
+        industry: str(a.industry), founded: typeof a.yearFounded === 'number' ? a.yearFounded : null,
+      };
+    },
+  },
+  {
+    // ~$0.005 за найденную ($0.01, если у Treg кончился свой аккаунт Hunter); «11-50», «10K-50K»
+    id: 'hunter.companies.enrich',
+    call: (domain) => ({ method: 'GET', query: { domain } }),
+    maxCostUsd: 0.012,
+    parse: (b) => {
+      const d = b?.data;
+      if (!d?.name) return null;
+      return {
+        name: str(d.name), domain: str(d.domain), employees: d.metrics?.employees, industry: str(d.category?.industry),
+        location: str(d.location), founded: typeof d.foundedYear === 'number' ? d.foundedYear : null,
+        linkedin: str(d.linkedin?.handle) ? `https://www.linkedin.com/${d.linkedin.handle}` : null,
+      };
+    },
+  },
+];
+
+function sameDomain(theirs: string | null | undefined, ours: string): boolean | null {
+  if (!theirs) return null;
+  try {
+    return baseDomain(theirs.includes('://') ? new URL(theirs).hostname : theirs) === baseDomain(ours);
+  } catch {
+    return null;
   }
+}
+
+/** Поля провайдера → итог; чужой домен в ответе — другая компания, её размер не берём. */
+export function toCompanyEnrich(c: ProviderCompany, domain: string, servedBy: string): CompanyEnrich {
+  const foreign = sameDomain(c.domain, domain) === false;
   return {
-    size: foreign ? null : parseEmployees(o.employees),
-    name: o.name ?? null,
-    industry: o.industry ?? null,
-    location: o.location ?? null,
-    founded: o.founded ?? null,
-    linkedinUrl: o.linkedin_url ?? null,
-    servedBy: t?.served_by ?? null,
+    size: foreign ? null : parseEmployees(c.employees),
+    name: c.name ?? null,
+    industry: c.industry ?? null,
+    location: c.location ?? null,
+    founded: c.founded ?? null,
+    linkedinUrl: c.linkedin ?? null,
+    servedBy,
     foreign,
   };
 }
 
-export async function tregEnrichCompany(domain: string, linkedinUrl: string | null): Promise<{ result: CompanyEnrich | null; costUsd: number }> {
-  const body: Record<string, string> = { domain };
-  // страница LinkedIn — только сверенная с доменом (по однофамильцу провайдер дал бы чужой размер)
-  // и только если разрешено TREG_USE_LINKEDIN
-  if (linkedinUrl && config.treg.useLinkedIn) body.linkedin_url = linkedinUrl;
-  const r = await tregCall('treg.companies.enrich', { method: 'POST', body, maxCostUsd: 0.03 });
-  return { result: r.status === 200 ? parseCompanyEnrich(r.body, domain) : null, costUsd: r.costUsd };
+/**
+ * Размер по домену: провайдеры по очереди, до первого ответа с численностью на нашем домене.
+ * Сбой одного провайдера (429, 5xx) — идём к следующему; фатальное (баланс, бюджет, токен) — наверх.
+ */
+export async function tregCompanySize(
+  domain: string, token = config.treg.token, fetchImpl: typeof fetch = fetch,
+): Promise<{ result: CompanyEnrich | null; costUsd: number }> {
+  let cost = 0;
+  let fallback: CompanyEnrich | null = null;
+  for (const p of SIZE_PROVIDERS) {
+    try {
+      const r = await tregCall(p.id, { ...p.call(domain), maxCostUsd: p.maxCostUsd, missStatuses: [404] }, token, fetchImpl);
+      cost += r.costUsd;
+      if (r.status !== 200) continue;
+      const c = p.parse(r.body);
+      if (!c) continue;
+      const result = toCompanyEnrich(c, domain, p.id);
+      if (result.size) return { result, costUsd: cost };
+      if (!result.foreign) fallback ??= result;
+    } catch (e) {
+      if (e instanceof TregError && e.fatal) throw e;
+      console.warn(`  ⚠ Treg ${p.id} ${domain}: ${(e as Error).message}`);
+    }
+  }
+  return { result: fallback, costUsd: cost };
 }

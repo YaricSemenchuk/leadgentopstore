@@ -236,24 +236,27 @@ export interface TregCompanyTarget {
   supportUrl: string | null;
   privacyUrl: string | null;
   email: string | null;
-  linkedinUrl: string | null;     // только сверенная с доменом страница
 }
 
-/** Компании без размера для treg.companies.enrich: целевые, затем под вопросом; частные лица — нет. */
+/**
+ * Версия поиска размера: v2 — своя цепочка провайдеров с численностью. Компании, проверенные
+ * маршрутом treg.companies.enrich (v1, он отдавал название без численности), проверяются заново.
+ */
+export const TREG_SIZE_VERSION = 2;
+
+/** Компании без размера: целевые, затем под вопросом; частные лица — нет. */
 export async function companiesNeedingSize(limit: number): Promise<TregCompanyTarget[]> {
   const { rows } = await pool.query(
-    `SELECT c.id, c.website, c.support_url, c.privacy_url, c.email,
-            CASE WHEN c.linkedin_confirmed THEN c.linkedin_url END AS linkedin_url
+    `SELECT c.id, c.website, c.support_url, c.privacy_url, c.email
      FROM companies c JOIN (${COMPANY_APPS}) a ON a.company_id = c.id
      WHERE a.tier_rank <= 1 AND c.checked_at IS NOT NULL AND c.employees IS NULL
-       AND c.treg_company_checked_at IS NULL AND COALESCE(c.kind, 'company') = 'company'
+       AND (c.treg_company_checked_at IS NULL OR COALESCE((c.treg_company->>'v')::int, 1) < $2)
+       AND COALESCE(c.kind, 'company') = 'company'
      ORDER BY a.tier_rank, a.best_fit DESC NULLS LAST
      LIMIT $1`,
-    [limit],
+    [limit, TREG_SIZE_VERSION],
   );
-  return rows.map((r) => ({
-    id: r.id, website: r.website, supportUrl: r.support_url, privacyUrl: r.privacy_url, email: r.email, linkedinUrl: r.linkedin_url,
-  }));
+  return rows.map((r) => ({ id: r.id, website: r.website, supportUrl: r.support_url, privacyUrl: r.privacy_url, email: r.email }));
 }
 
 /** Ответ Treg о компании; размер пишется, только если его ещё нет (LinkedIn и Hunter не дали). */
@@ -268,7 +271,9 @@ export async function saveTregCompany(id: number, r: CompanyEnrich | null): Prom
      WHERE id = $1`,
     [
       id,
-      r ? JSON.stringify({ name: r.name, industry: r.industry, location: r.location, founded: r.founded, by: r.servedBy, foreign: r.foreign }) : null,
+      JSON.stringify(r
+        ? { v: TREG_SIZE_VERSION, name: r.name, industry: r.industry, location: r.location, founded: r.founded, by: r.servedBy, foreign: r.foreign }
+        : { v: TREG_SIZE_VERSION }),
       size?.range ?? null, size?.min ?? null,
     ],
   );
