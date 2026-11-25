@@ -62,6 +62,7 @@ export async function startRun(
           contactsFound: r.withEmail,
           personalFound: r.withPersonal,
           linkedinFound: r.linkedinSite,
+          siteDescriptions: r.sites.found,
           linkedin: r.linkedin,
           hunter: r.hunter,
           treg: r.treg,
@@ -90,7 +91,7 @@ export interface RunRow {
   finished_at: Date | null;
   result: {
     scanned?: number; saved?: number; contactsChecked?: number; contactsFound?: number; personalFound?: number;
-    linkedinFound?: number; llmErrors?: number; failedCharts?: string[]; linkedin?: LinkedInSearchResult;
+    linkedinFound?: number; siteDescriptions?: number; llmErrors?: number; failedCharts?: string[]; linkedin?: LinkedInSearchResult;
     hunter?: HunterRunResult; treg?: TregRunResult;
   } | null;
   error: string | null;

@@ -166,3 +166,7 @@ ALTER TABLE companies ADD COLUMN IF NOT EXISTS email_checks      JSONB;        -
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS treg_company      JSONB;        -- {name, industry, location, founded, by}
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS treg_company_checked_at TIMESTAMPTZ;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS best_email_status TEXT;         -- проверка адреса «кому писать первым»
+
+-- v11: как компания описывает себя на главной сайта (meta description) — контекст для письма в списке «Люди»
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS site_description    TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS site_description_at TIMESTAMPTZ;  -- когда смотрели главную (описания могло не быть)

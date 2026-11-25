@@ -79,5 +79,7 @@ test('доменная зона-слово входит в бренд, юрид�
   assert.equal(brandFromWebsite('https://www.gryphon.games/'), 'gryphon games');
   assert.equal(brandFromWebsite('https://sunquest.app'), 'sunquest app');
   assert.equal(brandFromWebsite('https://bravo-inc.store/app-ads.txt'), 'bravo');
+  // хостинг app-ads.txt вместо сайта — не бренд
+  assert.equal(brandFromWebsite('https://x5dfde4eb.app-ads-txt.com'), null);
   assert.equal(brandFromWebsite('https://lava.gs'), 'lava');
 });

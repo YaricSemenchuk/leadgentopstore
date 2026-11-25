@@ -27,7 +27,31 @@ export interface SiteResult {
   emails: FoundEmail[];
   linkedin: LinkedInLink[];   // только со страниц на домене разработчика
   websiteOk: boolean | null;  // главная открылась; null — сайта нет
+  description: string | null; // как компания описывает себя на главной (meta description)
   pages: number;
+}
+
+// Заглушки конструкторов сайтов и шаблонов — не описание компании.
+const BOILERPLATE = /just another wordpress site|default description|^home$|^welcome|lorem ipsum|coming soon|under construction|site is under/i;
+
+/**
+ * Как компания описывает себя: meta description, og:description или twitter:description главной.
+ * Это контекст для письма («студия казуальных игр из Варшавы»); заглушки и обрывки отбрасываются.
+ */
+export function siteDescription(html: string): string | null {
+  if (!html) return null;
+  const $ = cheerio.load(html);
+  const candidates = [
+    $('meta[name="description" i]').attr('content'),
+    $('meta[property="og:description" i]').attr('content'),
+    $('meta[name="twitter:description" i]').attr('content'),
+  ];
+  for (const raw of candidates) {
+    const text = (raw ?? '').replace(/\s+/g, ' ').trim();
+    if (text.length < 20 || BOILERPLATE.test(text)) continue;
+    return text.length > 300 ? `${text.slice(0, 297).replace(/\s+\S*$/, '')}…` : text;
+  }
+  return null;
 }
 
 function sameSite(url: string, domain: string): boolean {
@@ -70,6 +94,7 @@ export async function crawlDeveloperSite(
   const errors: string[] = [];
   const visited = new Set<string>();
   let websiteOk: boolean | null = website ? false : null;
+  let description: string | null = null;
   const devDomain = website ? baseDomain(website) : null;
 
   const visit = async (url: string, source: EmailSource): Promise<string | null> => {
@@ -96,11 +121,12 @@ export async function crawlDeveloperSite(
     const home = await visit(website, 'website');
     websiteOk = home !== null;
     if (home) {
+      description = siteDescription(home);
       let next = usefulLinks(home, website);
       if (next.length === 0) next = FALLBACK_PATHS.map((p) => new URL(p, website).href);
       for (const url of next.slice(0, MAX_SITE_PAGES)) await visit(url, 'website');
     }
   }
 
-  return { emails, linkedin, websiteOk, pages: visited.size, errors };
+  return { emails, linkedin, websiteOk, description, pages: visited.size, errors };
 }

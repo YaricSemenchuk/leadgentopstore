@@ -97,6 +97,8 @@ const GENERIC_HOSTS = new Set([
   'itch', 'discord', 'telegram', 't', 'medium', 'substack', 'tumblr', 'helpshift', 'zendesk', 'freshdesk',
   'zohodesk', 'termly', 'iubenda', 'freeprivacypolicy', 'privacypolicies', 'app-privacy-policy', 'firebaseapp',
   'web', 'vercel', 'netlify', 'herokuapp', 'pages', 'sites', 'feishu', 'larksuite', 'qq', 'weixin', 'naver',
+  // хостинг app-ads.txt и прочие платформы, которые разработчики указывают вместо сайта
+  'app-ads-txt', 'intercom', 'helpscoutdocs', 'tilda', 'gitbook',
 ]);
 
 /** Бренд по домену сайта: «https://www.lastshelter.net» → «lastshelter», «muza-technologies.com» → «muza technologies». */

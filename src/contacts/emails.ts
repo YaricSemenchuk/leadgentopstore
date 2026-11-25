@@ -74,7 +74,7 @@ export function isFreeMailDomain(domain: string): boolean {
 // Ролевые слова. Длинные ищем подстрокой («fingerrush.customerservice», «aos_support»),
 // короткие — только целым словом: «mail» внутри «ismail», «dev» внутри «devon» — это имена.
 const ROLE_SUBSTR =
-  /support|supoprt|suport|contact|contato|team|engineer|technolog|software|digital|network|interactive|entertain|mobile|contacto|kontakt|service|servicio|customer|developer|marketing|partner|business|feedback|privacy|publish|career|recruit|helpdesk|enquir|inquir|office|admin|studio|hello|games|gaming|billing|account|finance|payment|invoice|legal|complian|newsletter|webmaster|suporte|soporte|atendimento|cooperat|advertis|official|operation|appstore|android|security|copyright|licens|affiliate|community|booking|reception|question|request|report|notification|subscription|social|global|general|people|welcome|investor/;
+  /support|supoprt|suport|contact|contato|team|engineer|technolog|software|digital|network|interactive|entertain|mobile|contacto|kontakt|service|servicio|customer|developer|marketing|partner|business|feedback|privacy|publish|career|recruit|helpdesk|enquir|inquir|office|admin|studio|hello|games|gaming|billing|account|finance|payment|invoice|legal|complian|newsletter|webmaster|suporte|soporte|atendimento|cooperat|advertis|official|operation|appstore|android|security|copyright|licens|affiliate|community|booking|reception|question|request|report|notification|subscription|social|global|general|people|welcome|investor|recrut|success|googleplay|wechat|weixin|grievance|privacidade|duvidas|gamemaster|console|inbox|internal|manager|connect/;
 const ROLE_WORD = new Set([
   'info', 'help', 'team', 'hi', 'hey', 'hola', 'ciao', 'hallo', 'bonjour', 'sales', 'pr', 'press', 'media', 'news', 'jobs',
   'job', 'hr', 'bd', 'biz', 'ads', 'ua', 'growth', 'mail', 'email', 'dev', 'devs', 'app', 'apps', 'ios', 'game', 'play',
@@ -83,12 +83,17 @@ const ROLE_WORD = new Set([
   'all', 'mobile', 'web', 'site', 'pay', 'ad', 'tech', 'it', 'kefu', 'service', 'events', 'event', 'marketing', 'contact',
   'office', 'admin', 'sale', 'player', 'players', 'fans', 'feedback', 'apple', 'google', 'facebook',
   'labs', 'lab', 'soft', 'studios', 'ltd', 'llc', 'inc', 'company', 'co', 'official', 'store',
+  // со страниц разработчиков (ноябрь 2026): api@, box@, eudsa@ (представитель по DSA), contat@ (опечатка contact)
+  'api', 'box', 'nbox', 'brand', 'brd', 'contat', 'ethics', 'eudsa', 'dsa', 'infor', 'manage', 'mydata', 'mkt', 'kf', 'gm',
+  'appdev', 'appgame', 'productapp',
 ]);
 // Ящик руководителя — адрес конкретного человека, пусть и без имени.
 const DECISION_LOCAL = /^(ceo|founder|cofounder|co-founder|owner|president|cmo|coo|cto|md|boss)\d*$/;
 
 function isRoleLocal(local: string): boolean {
   if (ROLE_SUBSTR.test(local)) return true;
+  // слово дважды — ящик бренда: presspress@, brandbrand@, rebelrebel@
+  if (/^([a-z]{3,})\1$/.test(local)) return true;
   return local.split(/[._+\-\d]+/).some((w) => ROLE_WORD.has(w));
 }
 

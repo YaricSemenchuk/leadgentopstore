@@ -6,19 +6,21 @@ import { pgChartCache } from '../apple/chart-cache.js';
 import { lookupPublishers, lookupWithFallback } from '../apple/lookup.js';
 import { buildCandidates, heuristicSignals, priorityScore, type Candidate } from '../pipeline/aggregate.js';
 import { llmErrorText, qualifyCandidate } from '../llm/qualify.js';
-import { companyDomain, enrichCompanyContacts, finalizeEmails, mailDomains } from '../contacts/company.js';
+import { companyDomain, developerDomains, enrichCompanyContacts, finalizeEmails, mailDomains } from '../contacts/company.js';
 import type { CompanyEmails, EmailCheck, EmailStatus, FoundEmail } from '../contacts/emails.js';
 import { hunterDomainSearch, hunterEnabled, HunterError } from '../contacts/hunter.js';
 import { nameParts } from '../contacts/names.js';
 import { findLinkedIn, searchEnabled, SearchApiError } from '../contacts/people-search.js';
+import { fetchPage } from '../contacts/safe-fetch.js';
+import { siteDescription } from '../contacts/site.js';
 import { startTregBudget, tregBudget, tregCompanySize, TregError, tregFindEmail, tregVerifyEmail } from '../contacts/treg.js';
 import {
   hideExcludedPublishers, initSchema, leadsForRescore, pool, recentlyQualified, refreshSignals, saveQualification, upsertLead,
 } from '../db/pool.js';
 import {
-  companiesNeedingContacts, companiesNeedingHunter, companiesNeedingLinkedIn, companiesNeedingSize, companiesWithEmails,
-  companiesWithPeople, emailInputs, saveCompanyContacts, saveCompanyEmails, saveEmailChecks, saveHunter, saveLinkedIn,
-  savePortfolio, saveTregCompany, saveTregLookups, type TregLookup,
+  companiesNeedingContacts, companiesNeedingHunter, companiesNeedingLinkedIn, companiesNeedingSiteDescription, companiesNeedingSize,
+  companiesWithEmails, companiesWithPeople, emailInputs, saveCompanyContacts, saveCompanyEmails, saveEmailChecks, saveHunter,
+  saveLinkedIn, savePortfolio, saveSiteDescription, saveTregCompany, saveTregLookups, type TregLookup,
 } from '../db/companies.js';
 import { getParseSettings, type ParseSettings } from '../settings.js';
 
@@ -381,11 +383,46 @@ async function fillPortfolios(artistIds: number[], report: Report): Promise<void
   for (const [artistId, s] of stats) await savePortfolio(artistId, s);
 }
 
+export interface SiteDescriptionResult {
+  checked: number;
+  found: number;
+}
+
+/**
+ * Описание с главной сайта для компаний, проверенных до того, как его начали сохранять: только
+ * главная, без обхода остальных страниц. Бесплатно; новые компании получают его при обычном сборе.
+ */
+export async function runSiteDescriptions(report: Report = silent): Promise<SiteDescriptionResult> {
+  const targets = await companiesNeedingSiteDescription(1000);
+  const result = { checked: 0, found: 0 };
+  if (targets.length === 0) return result;
+  const gate = pLimit(config.contacts.concurrency);
+  await Promise.all(
+    targets.map((t) =>
+      gate(async () => {
+        let description: string | null = null;
+        try {
+          // сайт на платформе (хостинг app-ads.txt, Notion, Wix…) — описание про платформу, не про компанию
+          if (developerDomains([t.website]).length) description = siteDescription((await fetchPage(t.website)).html);
+        } catch {
+          /* сайт не открылся — пометим, что смотрели, чтобы не ходить снова в каждом прогоне */
+        }
+        await saveSiteDescription(t.id, description);
+        if (description) result.found++;
+        report(`описание компаний с сайта ${++result.checked}/${targets.length}, нашлось у ${result.found}`);
+      }),
+    ),
+  );
+  console.log(`  описание с сайта: у ${result.found} из ${result.checked}`);
+  return result;
+}
+
 export interface CompaniesResult {
   checked: number;
   withEmail: number;
   withPersonal: number;
   linkedinSite: number;
+  sites: SiteDescriptionResult;
   linkedin: LinkedInSearchResult;
   hunter: HunterRunResult;
   treg: TregRunResult;
@@ -424,13 +461,14 @@ export async function runCompanies(report: Report = silent): Promise<CompaniesRe
     );
     console.log(`  компании: почта у ${result.withEmail} из ${targets.length}, личная у ${result.withPersonal}, LinkedIn на сайте у ${result.linkedinSite}`);
   }
+  const sites = await runSiteDescriptions(report);
   const linkedin = await runLinkedInSearch(report);
   const hunter = await runHunter(report);
   const treg = await runTreg(report);
   // правила разбора почты могли поменяться — пересобираем у всех проверенных компаний (без сети)
   report('пересборка почты компаний');
   await refreshAllEmails();
-  return { ...result, linkedin, hunter, treg };
+  return { ...result, sites, linkedin, hunter, treg };
 }
 
 /** Пересобирает почту всех проверенных компаний из сохранённых данных: после правки правил личная/общая. */

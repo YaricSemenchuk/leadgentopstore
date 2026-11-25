@@ -22,14 +22,14 @@ export const SOURCE_LABEL: Record<EmailSource, string> = {
 const SIZE_SOURCE: Record<string, string> = { linkedin: 'LinkedIn', hunter: 'Hunter', treg: 'Treg' };
 
 /** Проверка ящика: ✓ — принимает почту; accept_all — домен принимает всё, доставка не гарантирована. */
-function statusBadge(e: Pick<CompanyEmail, 'status'>): string {
+export function statusBadge(e: Pick<CompanyEmail, 'status'>): string {
   if (e.status === 'valid') return ' · <span class="ok" title="ящик принимает почту">✓ проверен</span>';
   if (e.status === 'accept_all') return ' · <span class="warn" title="сервер принимает любой адрес — доставку не подтвердить">домен принимает всё</span>';
   if (e.status === 'unknown') return ' · <span class="mut">проверка не дала ответа</span>';
   return '';
 }
 
-const SIZE_TABS: Array<[SizeFilter, string]> = [
+export const SIZE_TABS: Array<[SizeFilter, string]> = [
   ['any', 'Любой размер'],
   ['50', 'От 50 сотрудников'],
   ['11', '11–50'],

@@ -59,7 +59,8 @@ function runSummary(r: RunRow): string {
   if (!r.result) return '';
   if (r.params?.kind === 'contacts') {
     const personal = r.result.personalFound !== undefined ? `, личная у ${fmt(r.result.personalFound)}` : '';
-    return `компаний проверено ${fmt(r.result.contactsChecked)}, почта у ${fmt(r.result.contactsFound)}${personal}, LinkedIn на сайте у ${fmt(r.result.linkedinFound)}${linkedinSummary(r)}`;
+    const sites = r.result.siteDescriptions ? `, описание с сайта у ${fmt(r.result.siteDescriptions)}` : '';
+    return `компаний проверено ${fmt(r.result.contactsChecked)}, почта у ${fmt(r.result.contactsFound)}${personal}, LinkedIn на сайте у ${fmt(r.result.linkedinFound)}${sites}${linkedinSummary(r)}`;
   }
   const failed = r.result.failedCharts?.length ?? 0;
   const llmErrors = r.result.llmErrors ?? 0;

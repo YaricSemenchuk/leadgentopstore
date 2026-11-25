@@ -65,7 +65,7 @@ export async function saveCompanyContacts(id: number, cc: CompanyContacts): Prom
        kind = $2, is_trader = $3, duns = $4, address = COALESCE($5, $19), country = $6, phone = COALESCE($7, $20),
        website = $8, website_ok = $9, support_url = $10, privacy_url = $11,
        play_developer_url = $12, play_developer_name = $13, android_apps = $14, android_app_list = $15,
-       emails_raw = $16,
+       emails_raw = $16, site_description = $21, site_description_at = CASE WHEN $8::text IS NOT NULL THEN now() END,
        -- ссылка с сайта важнее; если на сайте нет — оставляем найденную поиском
        linkedin_url = CASE WHEN $17::text IS NOT NULL THEN $17 WHEN linkedin_source = 'search' THEN linkedin_url END,
        linkedin_source = CASE WHEN $17::text IS NOT NULL THEN 'site' WHEN linkedin_source = 'search' THEN 'search' END,
@@ -78,12 +78,33 @@ export async function saveCompanyContacts(id: number, cc: CompanyContacts): Prom
       cc.playDeveloperUrl, cc.playDeveloper?.name ?? null, cc.androidApps?.length ?? null,
       cc.androidApps ? JSON.stringify(cc.androidApps.slice(0, 50)) : null,
       JSON.stringify(cc.emailsRaw), cc.linkedinSite?.url ?? null, COMPANY_CONTACTS_VERSION,
-      cc.playDeveloper?.address ?? null, cc.playDeveloper?.phone ?? null,
+      cc.playDeveloper?.address ?? null, cc.playDeveloper?.phone ?? null, cc.siteDescription,
     ],
   );
   for (const a of cc.appPlayUrls) {
     await pool.query(`UPDATE leads SET play_url = $2 WHERE track_id = $1`, [a.trackId, a.playUrl]);
   }
+}
+
+/**
+ * Компании, у которых ещё не смотрели описание на главной: проверенные до v11 (сайт обходили, но
+ * описание не сохраняли). Целевые, затем под вопросом; сайт не открывался — не трогаем.
+ */
+export async function companiesNeedingSiteDescription(limit: number): Promise<Array<{ id: number; website: string }>> {
+  const { rows } = await pool.query(
+    `SELECT c.id, c.website
+     FROM companies c JOIN (${COMPANY_APPS}) a ON a.company_id = c.id
+     WHERE a.tier_rank <= 1 AND c.checked_at IS NOT NULL AND c.website IS NOT NULL
+       AND c.website_ok IS DISTINCT FROM false AND c.site_description_at IS NULL
+     ORDER BY a.tier_rank, a.best_fit DESC NULLS LAST
+     LIMIT $1`,
+    [limit],
+  );
+  return rows;
+}
+
+export async function saveSiteDescription(id: number, description: string | null): Promise<void> {
+  await pool.query(`UPDATE companies SET site_description = $2, site_description_at = now() WHERE id = $1`, [id, description]);
 }
 
 export interface LinkedInTarget {
@@ -400,7 +421,7 @@ export async function topCompanies(limit: number, f: CompanyFilter) {
               jsonb_agg(jsonb_build_object(
                 'name', l.name, 'url', l.app_store_url, 'play', l.play_url, 'tier', ${TIER_SQL}, 'fit', l.fit_score,
                 'placement', l.best_placement, 'countries', l.country_count, 'ratings', l.rating_count,
-                'vertical', COALESCE(l.vertical, l.primary_genre), 'reason', l.tier_reason
+                'vertical', COALESCE(l.vertical, l.primary_genre), 'reason', l.tier_reason, 'reasons', l.reasons
               ) ORDER BY l.fit_score DESC NULLS LAST) AS apps
        FROM leads l WHERE l.company_id IS NOT NULL GROUP BY l.company_id
      ) a ON a.company_id = c.id

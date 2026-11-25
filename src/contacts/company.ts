@@ -37,6 +37,7 @@ export interface CompanyContacts {
   playDeveloper: PlayDeveloper | null;
   website: string | null;
   websiteOk: boolean | null;
+  siteDescription: string | null;        // meta description главной — контекст компании
   supportUrl: string | null;
   privacyUrl: string | null;
   playDeveloperUrl: string | null;
@@ -123,6 +124,8 @@ export async function enrichCompanyContacts(input: CompanyInput): Promise<Compan
     playDeveloper,
     website,
     websiteOk: site.websiteOk,
+    // описание с хостинга app-ads.txt, Notion, Wix и т.п. — про платформу, не про компанию
+    siteDescription: developerDomains([website]).length ? site.description : null,
     supportUrl: store.supportUrl,
     privacyUrl: store.privacyUrl,
     playDeveloperUrl,

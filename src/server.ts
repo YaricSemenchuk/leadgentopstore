@@ -4,6 +4,9 @@ import { config } from './config.js';
 import { initSchema, topLeads, pool, type LeadFilter, type LeadView } from './db/pool.js';
 import { companyStats, topCompanies } from './db/companies.js';
 import { COMPANY_CSV, companyFilterFrom, renderCompaniesPage, SOURCE_LABEL, TIER_LABEL } from './web/companies-page.js';
+import {
+  buildPeopleRows, companyFilterOf, filterPeople, PEOPLE_CSV, peopleFilterFrom, renderPeoplePage,
+} from './web/people-page.js';
 import { currentRun, markInterruptedRuns, recentRuns, startRun } from './jobs/runner.js';
 import { getParseSettings, ParseSettingsSchema, saveParseSettings } from './settings.js';
 import { renderSettingsPage, type Flash } from './web/settings-page.js';
@@ -115,6 +118,33 @@ app.get('/api/companies', wrap(async (req, res) => {
 
 app.get('/api/companies.csv', wrap(async (req, res) => {
   sendCsv(res, 'companies.csv', COMPANY_CSV, await topCompanies(5000, companyFilterFrom(req.query)));
+}));
+
+// --- Люди: одна строка — человек (почта, профиль LinkedIn, компания и её контекст) ---
+
+async function peopleFor(req: Request) {
+  const filter = peopleFilterFrom(req.query);
+  const all = buildPeopleRows(await topCompanies(5000, companyFilterOf(filter)));
+  return { filter, all, rows: filterPeople(all, filter) };
+}
+
+app.get('/people', wrap(async (req, res) => {
+  const { filter, all, rows } = await peopleFor(req);
+  res.type('html').send(renderPeoplePage({ rows, all, filter, run: currentRun() }));
+}));
+
+app.get('/api/people', wrap(async (req, res) => {
+  const limit = Math.min(Number(req.query.limit ?? 500) || 500, 5000);
+  const { rows } = await peopleFor(req);
+  res.json(rows.slice(0, limit).map((r) => ({
+    ...r.person, company: r.company.name, companyTier: r.company.tier, companyFit: r.company.best_fit,
+    companySize: r.company.employees, country: r.company.country, companyEmail: r.roleEmail,
+    companyLinkedIn: r.company.linkedin_url, website: r.company.website, companyContext: r.context, pitchHook: r.company.pitch_hook,
+  })));
+}));
+
+app.get('/api/people.csv', wrap(async (req, res) => {
+  sendCsv(res, 'people.csv', PEOPLE_CSV, (await peopleFor(req)).rows);
 }));
 
 // --- Приложения: одна строка — приложение; контакты — его компании ---

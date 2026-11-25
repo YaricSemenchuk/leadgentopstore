@@ -68,6 +68,16 @@ test('личный адрес и общий ящик: имя — личный, �
   assert.equal(classifyEmail('ismail@fusegames.io', c), 'personal');
 });
 
+test('служебные ящики, похожие на имя, — общие (ноябрь 2026)', () => {
+  const c = { company: 'Some Studio Ltd', domains: ['studio.io'], individual: false };
+  for (const local of ['success', 'api', 'recrutement', 'eudsa', 'grievance', 'presspress', 'brandbrand', 'manager', 'ht_mkt', 'kf_weixin', 'gm01', 'appdev', 'contat', 'googleplay', 'connect']) {
+    assert.equal(classifyEmail(`${local}@studio.io`, c), 'role', local);
+  }
+  for (const local of ['li.wei', 'yavuz', 'remi', 'connery', 'huanqing.liu', 'boxer']) {
+    assert.equal(classifyEmail(`${local}@studio.io`, c), 'personal', local);
+  }
+});
+
 test('личный адрес идёт первым, затем партнёрский ящик, поддержка, юридический', () => {
   const r = build(
     [
