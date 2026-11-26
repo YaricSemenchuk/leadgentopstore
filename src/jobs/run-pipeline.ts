@@ -23,6 +23,7 @@ import {
   saveLinkedIn, savePortfolio, saveSiteDescription, saveTregCompany, saveTregLookups, type TregLookup,
 } from '../db/companies.js';
 import { getParseSettings, type ParseSettings } from '../settings.js';
+import { runAsaEu, type AsaEuRunResult } from './asa-eu-run.js';
 
 /** Отчёт о ходе прохода: этап и счётчик — дашборд показывает его, пока проход идёт. */
 export type Report = (stage: string) => void;
@@ -64,6 +65,7 @@ export interface PipelineResult {
   linkedin?: LinkedInSearchResult;
   hunter?: HunterRunResult;
   treg?: TregRunResult;
+  asaEu?: AsaEuRunResult;
 }
 
 export interface LinkedInSearchResult {
@@ -426,6 +428,7 @@ export interface CompaniesResult {
   linkedin: LinkedInSearchResult;
   hunter: HunterRunResult;
   treg: TregRunResult;
+  asaEu: AsaEuRunResult;
 }
 
 /**
@@ -465,10 +468,12 @@ export async function runCompanies(report: Report = silent): Promise<CompaniesRe
   const linkedin = await runLinkedInSearch(report);
   const hunter = await runHunter(report);
   const treg = await runTreg(report);
+  // бесплатно, но медленно (лимит реестра Apple) — после платных шагов, чтобы контакты пришли раньше
+  const asaEu = await runAsaEu(report);
   // правила разбора почты могли поменяться — пересобираем у всех проверенных компаний (без сети)
   report('пересборка почты компаний');
   await refreshAllEmails();
-  return { ...result, sites, linkedin, hunter, treg };
+  return { ...result, sites, linkedin, hunter, treg, asaEu };
 }
 
 /** Пересобирает почту всех проверенных компаний из сохранённых данных: после правки правил личная/общая. */
@@ -643,10 +648,11 @@ export async function runPipeline({ dryRun = false, settings, report = silent }:
     scanned: candidates.length, targets: targets.length, qualified: toQualify.length, saved,
     contactsChecked: companies.checked, contactsFound: companies.withEmail, personalFound: companies.withPersonal,
     llmErrors: failedLlm, failedCharts: failed, linkedin: companies.linkedin, hunter: companies.hunter, treg: companies.treg,
+    asaEu: companies.asaEu,
   };
 }
 
-// Прямой запуск: npm run ingest [-- --dry-run | --contacts-only | --linkedin | --hunter | --treg | --refresh-emails | --rescore | --rescore-all]
+// Прямой запуск: npm run ingest [-- --dry-run | --contacts-only | --linkedin | --hunter | --treg | --asa-eu | --refresh-emails | --rescore | --rescore-all]
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const arg = (flag: string) => process.argv.includes(flag);
   try {
@@ -657,6 +663,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     else if (arg('--linkedin')) await runLinkedInSearch();
     else if (arg('--hunter')) await runHunter();
     else if (arg('--treg')) await runTreg();
+    else if (arg('--asa-eu')) await runAsaEu(undefined, 2_000);
     else if (arg('--refresh-emails')) console.log(`  почта пересобрана у ${await refreshAllEmails()} компаний`);
     else if (arg('--rescore') || arg('--rescore-all')) await runRescore({ all: arg('--rescore-all') });
     else await runPipeline({ dryRun: arg('--dry-run') });

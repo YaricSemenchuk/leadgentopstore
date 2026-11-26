@@ -45,7 +45,7 @@ function peopleQuery(f: PeopleFilter): string {
 
 /** Компании по уровню и размеру; фильтры по человеку применяются к списку людей. */
 export function companyFilterOf(f: PeopleFilter): CompanyFilter {
-  return { view: f.view, size: f.size, withEmail: false, withPersonal: false, withPlay: false, withLinkedIn: false };
+  return { view: f.view, size: f.size, asa: 'any', withEmail: false, withPersonal: false, withPlay: false, withLinkedIn: false };
 }
 
 export interface PersonRow {
@@ -212,6 +212,8 @@ export const PEOPLE_CSV: Array<[string, (r: PersonRow) => unknown]> = [
   ['company_linkedin', (r) => r.company.linkedin_url],
   ['website', (r) => r.company.website],
   ['company_context', (r) => r.context],
+  ['company_apple_ads_eu', (r) => r.company.asa_status],
+  ['company_apple_ads_eu_last_shown', (r) => r.company.asa_last],
   ['pitch_hook', (r) => r.company.pitch_hook],
   ['app_store', (r) => r.company.apps?.[0]?.url],
 ];

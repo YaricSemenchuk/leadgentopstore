@@ -49,6 +49,10 @@ export interface CompanyRow {
   site_description: string | null;
   apps: ContextApp[] | null;
   pitch_hook: string | null;
+  /** Apple Ads в ЕС по реестру Apple: active | past | none; NULL — не проверяли */
+  asa_status?: string | null;
+  asa_last?: string | null;
+  asa_countries?: string[] | null;
 }
 
 /** Откуда имя: профиль LinkedIn, провайдер почты (Hunter/Treg знают владельца), сам адрес, имя частного разработчика. */
@@ -197,6 +201,16 @@ export function companyRoleEmail(r: Pick<CompanyRow, 'emails'>): string | null {
 }
 
 const num = (n: unknown) => Number(n).toLocaleString('ru-RU');
+const ruDay = (iso: string) =>
+  new Date(`${iso.slice(0, 10)}T00:00:00Z`).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+
+/** Реклама в App Store в ЕС — сильный повод для письма про Apple Ads; «не замечена» фактом не считаем. */
+function asaSentence(r: CompanyRow): string {
+  if ((r.asa_status !== 'active' && r.asa_status !== 'past') || !r.asa_last) return '';
+  const countries = r.asa_countries ?? [];
+  const where = countries.length ? ` (${countries.slice(0, 5).join(', ')}${countries.length > 5 ? ` и ещё ${countries.length - 5}` : ''})` : '';
+  return `Apple Ads в ЕС: реклама ${r.asa_status === 'active' ? 'идёт' : 'была'}, последний показ ${ruDay(r.asa_last)}${where}.`;
+}
 const sentence = (s: string) => {
   const t = s.trim();
   return t ? `${t.charAt(0).toUpperCase()}${t.slice(1)}${/[.!?…]$/.test(t) ? '' : '.'}` : '';
@@ -236,6 +250,7 @@ export function companyContext(r: CompanyRow): string {
     r.site_description ? `О себе на сайте: «${r.site_description.replace(/[«»]/g, '"').replace(/\.\s*$/, '')}».` : '',
     portfolio.length ? `Приложений: ${portfolio.join(', ')}.` : '',
     chart.length ? `В чартах: ${chart.join('; ')}${moreApps}.` : '',
+    asaSentence(r),
     why ? `Почему подходит: ${why}.` : '',
   ]
     .filter(Boolean)

@@ -123,3 +123,14 @@ test('контекст компании — кто, где, размер, при
       'Почему подходит: в топе 19 стран; мало отзывов при высокой позиции.',
   );
 });
+
+test('контекст: Apple Ads в ЕС — идёт или была, со странами; «не замечена» не пишем', () => {
+  const active = companyContext(company({ asa_status: 'active', asa_last: '2026-11-21', asa_countries: ['NL', 'BE'] }));
+  assert.ok(active.endsWith('Apple Ads в ЕС: реклама идёт, последний показ 21 ноября (NL, BE).'), active);
+  const past = companyContext(company({
+    asa_status: 'past', asa_last: '2026-11-10', asa_countries: ['DE', 'ES', 'FR', 'CZ', 'BE', 'DK', 'AT'],
+  }));
+  assert.ok(past.includes('реклама была, последний показ 10 ноября (DE, ES, FR, CZ, BE и ещё 2).'), past);
+  assert.ok(!companyContext(company({ asa_status: 'none', asa_last: null })).includes('Apple Ads'));
+  assert.ok(!companyContext(company()).includes('Apple Ads'));
+});

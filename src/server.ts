@@ -374,6 +374,17 @@ app.post('/runs/contacts', wrap(async (_req, res) => {
   res.status(409).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, hunterEnabled, treg, flash: { kind: 'bad', text: `Не запущено: ${r.reason}` } }));
 }));
 
+// Проверка приложений компаний в реестре рекламы Apple — бесплатно, без модели и платных API
+app.post('/runs/asa-eu', wrap(async (_req, res) => {
+  const r = await startRun('ui', 'asa');
+  if (r.started) {
+    res.redirect(303, `/settings?started=${r.id}`);
+    return;
+  }
+  const [settings, runs] = await Promise.all([getParseSettings(), recentRuns()]);
+  res.status(409).type('html').send(renderSettingsPage({ settings, run: currentRun(), runs, searchEnabled, hunterEnabled, treg, flash: { kind: 'bad', text: `Не запущено: ${r.reason}` } }));
+}));
+
 app.get('/api/run-status', wrap(async (_req, res) => {
   res.json({ current: currentRun(), runs: await recentRuns(5) });
 }));

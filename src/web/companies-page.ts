@@ -1,5 +1,5 @@
 import type { CurrentRun } from '../jobs/runner.js';
-import type { CompanyFilter, SizeFilter } from '../db/companies.js';
+import type { AsaFilter, CompanyFilter, SizeFilter } from '../db/companies.js';
 import type { CompanyEmail, EmailSource } from '../contacts/emails.js';
 import { linkedinSearchLinks } from '../contacts/linkedin.js';
 import type { LeadView } from '../db/pool.js';
@@ -37,12 +37,21 @@ export const SIZE_TABS: Array<[SizeFilter, string]> = [
   ['unknown', 'Размер неизвестен'],
 ];
 
+export const ASA_TABS: Array<[AsaFilter, string]> = [
+  ['any', 'Apple Ads в ЕС: все'],
+  ['active', 'Крутят сейчас'],
+  ['ran', 'Крутили за 90 дней'],
+  ['none', 'Не замечены'],
+];
+
 export function companyFilterFrom(q: Record<string, unknown>): CompanyFilter {
   const v = String(q.view ?? '');
   const s = String(q.size ?? '');
+  const a = String(q.asa ?? '');
   return {
     view: v === 'target' || v === 'maybe' || v === 'skip' ? v : 'active',
     size: (SIZE_TABS.some(([k]) => k === s) ? s : 'any') as SizeFilter,
+    asa: (ASA_TABS.some(([k]) => k === a) ? a : 'any') as AsaFilter,
     withEmail: q.email === '1',
     withPersonal: q.personal === '1',
     withPlay: q.play === '1',
@@ -54,6 +63,7 @@ export function companyQuery(f: CompanyFilter): string {
   const p = new URLSearchParams();
   if (f.view !== 'active') p.set('view', f.view);
   if (f.size !== 'any') p.set('size', f.size);
+  if (f.asa !== 'any') p.set('asa', f.asa);
   if (f.withPersonal) p.set('personal', '1');
   if (f.withEmail) p.set('email', '1');
   if (f.withPlay) p.set('play', '1');
@@ -71,6 +81,26 @@ export function sizeLabel(r: any): string {
   if (r.kind === 'individual') return 'частное лицо';
   if (r.employees) return `${esc(r.employees)} сотрудников <span class="mut">(${esc(SIZE_SOURCE[r.employees_source] ?? r.employees_source ?? 'LinkedIn')})</span>`;
   return '<span class="mut">размер неизвестен</span>';
+}
+
+const ruDate = (iso: unknown, month: 'short' | 'long' = 'short') => {
+  const d = new Date(`${String(iso).slice(0, 10)}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('ru-RU', { day: 'numeric', month, timeZone: 'UTC' });
+};
+
+/**
+ * Реклама компании в App Store в ЕС по реестру Apple (лучшее из её приложений в чартах).
+ * Не проверяли — ничего не пишем: строка была бы у каждой компании до первого прохода.
+ */
+export function asaLine(r: any): string {
+  if (!r.asa_status) return '';
+  const checked = r.asa_checked_at ? `, проверено ${ruDate(new Date(r.asa_checked_at).toISOString())}` : '';
+  const title = `Реестр рекламы Apple: 25 стран ЕС, 90 дней, данные отстают примерно на неделю${checked}`;
+  if (r.asa_status === 'none') return `<div class="small mut" title="${esc(title)}">Apple Ads в ЕС: рекламы не было</div>`;
+  const countries = (r.asa_countries ?? []) as string[];
+  const shown = countries.slice(0, 6).join(', ') + (countries.length > 6 ? ` +${countries.length - 6}` : '');
+  const [cls, label] = r.asa_status === 'active' ? ['ok', 'идёт реклама'] : ['warn', 'была реклама'];
+  return `<div class="small" title="${esc(title)}"><span class="${cls}">Apple Ads в ЕС: ${label}</span>, последний показ ${esc(ruDate(r.asa_last))}${shown ? ` · ${esc(shown)}` : ''}</div>`;
 }
 
 /** Проверка компании: D-U-N-S из App Store ЕС — Apple подтвердила юрлицо. */
@@ -160,6 +190,7 @@ export function renderCompaniesPage(o: {
       <td class="co"><b>${esc(r.name)}</b>
         <div class="small">${verifyLabel(r)}${r.country ? ` · ${esc(r.country)}` : ''}</div>
         <div class="small">${sizeLabel(r)}</div>
+        ${asaLine(r)}
         <div class="small">${[link(r.website, 'сайт') + (r.website_ok === false ? ' <span class="warn">не открылся</span>' : ''), link(r.support_url, 'поддержка'), link(r.play_developer_url, 'Google Play')].filter((x) => x && !x.startsWith(' ')).join(' · ')}</div></td>
       <td class="apps">${appsCell(r)}</td>
       <td class="contact">${personalCell(r)}</td>
@@ -174,7 +205,8 @@ export function renderCompaniesPage(o: {
   const sizeTabs = SIZE_TABS.map(([size, label]) => tab(filter.size === size, { ...filter, size }, label)).join('');
   const toggle = (key: 'withPersonal' | 'withEmail' | 'withPlay' | 'withLinkedIn', label: string) =>
     tab(filter[key], { ...filter, [key]: !filter[key] }, label);
-  const filtered = filter.view !== 'active' || filter.size !== 'any' || filter.withEmail || filter.withPersonal || filter.withPlay || filter.withLinkedIn;
+  const asaTabs = ASA_TABS.map(([asa, label]) => tab(filter.asa === asa, { ...filter, asa }, label)).join('');
+  const filtered = filter.view !== 'active' || filter.size !== 'any' || filter.asa !== 'any' || filter.withEmail || filter.withPersonal || filter.withPlay || filter.withLinkedIn;
 
   return page({
     title: 'Компании',
@@ -182,12 +214,13 @@ export function renderCompaniesPage(o: {
     run: o.run,
     body: `
   <h1>Компании</h1>
-  <p class="sub">Целевых компаний: <b>${stats.target}</b> (их приложений в чартах: ${stats.target_apps}) · с личной почтой ${stats.target_with_personal} · с любой почтой ${stats.target_with_email}${stats.target_best_valid ? ` (адрес проверен у ${stats.target_best_valid})` : ''} · от 50 сотрудников ${stats.target_50} (вместе с «под вопросом» — ${stats.active_50}; размер известен у ${stats.target_sized} целевых) · юрлицо подтверждено ${stats.target_verified} · в Google Play ${stats.target_on_play} · с LinkedIn ${stats.target_with_linkedin}
+  <p class="sub">Целевых компаний: <b>${stats.target}</b> (их приложений в чартах: ${stats.target_apps}) · с личной почтой ${stats.target_with_personal} · с любой почтой ${stats.target_with_email}${stats.target_best_valid ? ` (адрес проверен у ${stats.target_best_valid})` : ''} · от 50 сотрудников ${stats.target_50} (вместе с «под вопросом» — ${stats.active_50}; размер известен у ${stats.target_sized} целевых) · юрлицо подтверждено ${stats.target_verified} · в Google Play ${stats.target_on_play} · с LinkedIn ${stats.target_with_linkedin}${stats.target_asa_checked ? ` · крутят Apple Ads в ЕС ${stats.target_asa_active}, крутили раньше ${stats.target_asa_past} (проверено ${stats.target_asa_checked})` : ''}
     <br>Под вопросом: ${stats.maybe} · мимо: ${stats.skip} (скрыты)${stats.unchecked ? ` · <span class="warn">контакты не проверены: ${stats.unchecked}</span> — «Дособрать контакты» на странице <a href="/settings">Что парсить</a>` : ''}</p>
   <div class="bar">
     ${viewTab('active', 'Целевые и под вопросом')}${viewTab('target', 'Только целевые')}${viewTab('maybe', 'Под вопросом')}${viewTab('skip', 'Мимо')}
   </div>
   <div class="bar">${sizeTabs}</div>
+  <div class="bar">${asaTabs}</div>
   <div class="bar">
     ${toggle('withPersonal', 'С личной почтой')}${toggle('withEmail', 'С почтой')}${toggle('withPlay', 'Есть в Google Play')}${toggle('withLinkedIn', 'С LinkedIn')}
     <a class="tab csv" href="/api/companies.csv${companyQuery(filter)}">Скачать CSV</a>
@@ -245,4 +278,7 @@ export const COMPANY_CSV: Array<[string, (r: any) => unknown]> = [
   ['apps_in_charts', (r) => (r.apps ?? []).map((a: any) => `${a.name} [${a.tier}, ${a.fit ?? ''}]`).join(' | ')],
   ['app_store_urls', (r) => (r.apps ?? []).map((a: any) => a.url).join(' ')],
   ['pitch_hook', (r) => r.pitch_hook],
+  ['apple_ads_eu', (r) => r.asa_status],
+  ['apple_ads_eu_last_shown', (r) => r.asa_last],
+  ['apple_ads_eu_countries', (r) => (r.asa_countries ?? []).join(' ')],
 ];

@@ -3,6 +3,7 @@ import { getParseSettings } from '../settings.js';
 import {
   llmKeyMissing, runCompanies, runPipeline, type HunterRunResult, type LinkedInSearchResult, type TregRunResult,
 } from './run-pipeline.js';
+import { runAsaEu, type AsaEuRunResult } from './asa-eu-run.js';
 
 /**
  * Запуск прохода из дашборда или по API: не больше одного одновременно (сервис на Railway
@@ -11,8 +12,14 @@ import {
 
 export type RunTrigger = 'ui' | 'api';
 
-/** full — сбор, оценка и контакты; contacts — только дособрать контакты компаний, LinkedIn, Hunter и Treg (без модели). */
-export type RunKind = 'full' | 'contacts';
+/**
+ * full — сбор, оценка и контакты; contacts — только дособрать контакты компаний, LinkedIn, Hunter и Treg (без модели);
+ * asa — только проверить приложения компаний в реестре рекламы Apple (бесплатно, без модели и платных API).
+ */
+export type RunKind = 'full' | 'contacts' | 'asa';
+
+/** Отдельный проход «Apple Ads в ЕС» берёт все приложения, которым пора, — не только порцию на прогон. */
+const ASA_RUN_LIMIT = 2_000;
 
 export interface CurrentRun {
   id: number;
@@ -56,7 +63,9 @@ export async function startRun(
 
   const report = (stage: string) => (run.stage = stage);
   const work =
-    kind === 'contacts'
+    kind === 'asa'
+      ? runAsaEu(report, ASA_RUN_LIMIT).then((asaEu) => ({ asaEu }))
+      : kind === 'contacts'
       ? runCompanies(report).then((r) => ({
           contactsChecked: r.checked,
           contactsFound: r.withEmail,
@@ -66,6 +75,7 @@ export async function startRun(
           linkedin: r.linkedin,
           hunter: r.hunter,
           treg: r.treg,
+          asaEu: r.asaEu,
         }))
       : runPipeline({ settings, report });
   work
@@ -92,7 +102,7 @@ export interface RunRow {
   result: {
     scanned?: number; saved?: number; contactsChecked?: number; contactsFound?: number; personalFound?: number;
     linkedinFound?: number; siteDescriptions?: number; llmErrors?: number; failedCharts?: string[]; linkedin?: LinkedInSearchResult;
-    hunter?: HunterRunResult; treg?: TregRunResult;
+    hunter?: HunterRunResult; treg?: TregRunResult; asaEu?: AsaEuRunResult;
   } | null;
   error: string | null;
   params: { kind?: RunKind; countries?: string[]; genres?: string[]; charts?: string[] } | null;

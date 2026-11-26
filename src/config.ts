@@ -156,6 +156,13 @@ export const config = {
     // но против правил LinkedIn); по умолчанию ищем только по имени и домену
     useLinkedIn: (process.env.TREG_USE_LINKEDIN ?? '').trim() === '1',
   },
+  // Apple Ads в ЕС по реестру Apple (Ad Repository): бесплатно, но ~1 запрос в 3 секунды,
+  // поэтому 300 приложений — это ~15 минут прохода
+  asaEu: {
+    maxPerRun: num(process.env.ASA_EU_MAX_PER_RUN, 300),
+    // через сколько дней перепроверять приложение в прогонах (расширению хватает кэша на сутки)
+    recheckDays: num(process.env.ASA_EU_RECHECK_DAYS, 7),
+  },
 
   llm: {
     provider: (process.env.LLM_PROVIDER ?? 'anthropic') as 'anthropic' | 'groq',

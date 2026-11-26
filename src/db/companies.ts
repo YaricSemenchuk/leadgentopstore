@@ -16,6 +16,48 @@ const COMPANY_APPS = `
 
 const HAS_PEOPLE = `jsonb_array_length(COALESCE(c.linkedin_people, '[]'::jsonb)) > 0`;
 
+/** «Сейчас крутит» — последний показ не старше 14 дней: данные Apple отстают на неделю, проверка в прогонах — раз в неделю. */
+export const ASA_ACTIVE_DAYS = 14;
+
+/**
+ * Apple Ads в ЕС на уровне компании — по проверенным приложениям из asa_eu_cache: последний показ
+ * (самый свежий среди приложений), статус от сегодняшнего дня и страны, свежие первыми.
+ * Компании без проверенных приложений сюда не попадают (статус NULL — «не проверяли»).
+ */
+const COMPANY_ASA = `
+  SELECT l.company_id,
+         CASE WHEN max(x.summary->>'lastImpression') >= to_char(current_date - ${ASA_ACTIVE_DAYS}, 'YYYY-MM-DD') THEN 'active'
+              WHEN max(x.summary->>'lastImpression') IS NOT NULL THEN 'past'
+              ELSE 'none' END AS asa_status,
+         max(x.summary->>'lastImpression') AS asa_last,
+         min(x.fetched_at) AS asa_checked_at,
+         (SELECT array_agg(t.k ORDER BY t.last DESC, t.k)
+          FROM (SELECT e->>'key' AS k, max(e->>'last') AS last
+                FROM leads l2 JOIN asa_eu_cache x2 ON x2.app_id::text = l2.track_id
+                CROSS JOIN jsonb_array_elements(x2.summary->'countries') e
+                WHERE l2.company_id = l.company_id GROUP BY 1) t) AS asa_countries
+  FROM leads l JOIN asa_eu_cache x ON x.app_id::text = l.track_id
+  WHERE l.company_id IS NOT NULL
+  GROUP BY l.company_id`;
+
+/**
+ * Приложения компаний (целевых и под вопросом), которые пора проверить в реестре Apple:
+ * ни разу не проверенные первыми, затем устаревшие; внутри — лучшие компании первыми.
+ */
+export async function appsNeedingAsaEu(limit: number, recheckDays: number): Promise<string[]> {
+  const { rows } = await pool.query(
+    `SELECT l.track_id
+     FROM leads l JOIN (${COMPANY_APPS}) a ON a.company_id = l.company_id
+     LEFT JOIN asa_eu_cache x ON x.app_id::text = l.track_id
+     WHERE a.tier_rank <= 1 AND l.track_id ~ '^[0-9]{1,12}$'
+       AND (x.app_id IS NULL OR x.fetched_at < now() - make_interval(days => $2))
+     ORDER BY (x.app_id IS NOT NULL), a.tier_rank, a.best_fit DESC NULLS LAST, l.fit_score DESC NULLS LAST
+     LIMIT $1`,
+    [limit, recheckDays],
+  );
+  return rows.map((r) => r.track_id as string);
+}
+
 export interface CompanyTarget extends CompanyInput {
   artistId: number;
   hasPortfolio: boolean;
@@ -375,9 +417,13 @@ export async function saveEmailChecks(id: number, checks: Record<string, EmailCh
 /** Размер: от 50 сотрудников (LinkedIn «51-200» и выше), 11–50, до 10 и частные лица, неизвестно. */
 export type SizeFilter = 'any' | '50' | '11' | '10' | 'unknown';
 
+/** Apple Ads в ЕС: любая, крутит сейчас, крутила за 90 дней (сейчас или раньше), не замечена в реестре. */
+export type AsaFilter = 'any' | 'active' | 'ran' | 'none';
+
 export interface CompanyFilter {
   view: LeadView;
   size: SizeFilter;
+  asa: AsaFilter;
   withEmail: boolean;
   withPersonal: boolean;
   withPlay: boolean;
@@ -392,6 +438,13 @@ const SIZE_SQL: Record<SizeFilter, string | null> = {
   unknown: `(c.employees_min IS NULL AND COALESCE(c.kind, '') <> 'individual')`,
 };
 
+const ASA_SQL: Record<AsaFilter, string | null> = {
+  any: null,
+  active: `s.asa_status = 'active'`,
+  ran: `s.asa_status IN ('active', 'past')`,
+  none: `s.asa_status = 'none'`,
+};
+
 const TIER_RANK: Record<string, number> = { target: 0, maybe: 1, skip: 2 };
 
 export async function topCompanies(limit: number, f: CompanyFilter) {
@@ -404,13 +457,16 @@ export async function topCompanies(limit: number, f: CompanyFilter) {
   }
   const size = SIZE_SQL[f.size];
   if (size) where.push(size);
+  const asa = ASA_SQL[f.asa];
+  if (asa) where.push(asa);
   if (f.withEmail) where.push('c.email IS NOT NULL');
   if (f.withPersonal) where.push('c.personal_emails > 0');
   if (f.withPlay) where.push('c.android_apps > 0');
   if (f.withLinkedIn) where.push(`(c.linkedin_url IS NOT NULL OR ${HAS_PEOPLE})`);
   const { rows } = await pool.query(
     `SELECT c.*, a.tier_rank, a.best_fit, a.chart_apps, a.apps, a.pitch_hook,
-            (ARRAY['target','maybe','skip'])[a.tier_rank + 1] AS tier
+            (ARRAY['target','maybe','skip'])[a.tier_rank + 1] AS tier,
+            s.asa_status, s.asa_last, s.asa_countries, s.asa_checked_at
      FROM companies c
      JOIN (
        SELECT l.company_id,
@@ -425,6 +481,7 @@ export async function topCompanies(limit: number, f: CompanyFilter) {
               ) ORDER BY l.fit_score DESC NULLS LAST) AS apps
        FROM leads l WHERE l.company_id IS NOT NULL GROUP BY l.company_id
      ) a ON a.company_id = c.id
+     LEFT JOIN (${COMPANY_ASA}) s ON s.company_id = c.id
      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
      ORDER BY a.tier_rank, a.best_fit DESC NULLS LAST, c.personal_emails DESC, (c.email IS NOT NULL) DESC
      LIMIT $1`,
@@ -445,13 +502,18 @@ export async function companyStats() {
             count(*) FILTER (WHERE a.tier_rank = 0 AND c.android_apps > 0)::int AS target_on_play,
             count(*) FILTER (WHERE a.tier_rank = 0 AND (c.linkedin_url IS NOT NULL OR ${HAS_PEOPLE}))::int AS target_with_linkedin,
             count(*) FILTER (WHERE a.tier_rank = 0 AND c.duns IS NOT NULL)::int AS target_verified,
+            count(*) FILTER (WHERE a.tier_rank = 0 AND s.asa_status = 'active')::int AS target_asa_active,
+            count(*) FILTER (WHERE a.tier_rank = 0 AND s.asa_status = 'past')::int AS target_asa_past,
+            count(*) FILTER (WHERE a.tier_rank = 0 AND s.asa_status IS NOT NULL)::int AS target_asa_checked,
             count(*) FILTER (WHERE a.tier_rank = 1)::int AS maybe,
             count(*) FILTER (WHERE a.tier_rank = 2)::int AS skip,
             count(*) FILTER (WHERE a.tier_rank <= 1 AND c.checked_at IS NULL)::int AS unchecked,
             (SELECT count(*)::int FROM leads l WHERE ${TIER_SQL} = 'target') AS target_apps
-     FROM companies c JOIN (${COMPANY_APPS}) a ON a.company_id = c.id`,
+     FROM companies c JOIN (${COMPANY_APPS}) a ON a.company_id = c.id
+     LEFT JOIN (${COMPANY_ASA}) s ON s.company_id = c.id`,
   );
   return rows[0] as {
+    target_asa_active: number; target_asa_past: number; target_asa_checked: number;
     target: number; target_with_email: number; target_with_personal: number; target_50: number; active_50: number;
     target_sized: number; target_best_valid: number;
     target_on_play: number; target_with_linkedin: number; target_verified: number; maybe: number; skip: number;

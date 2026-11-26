@@ -1,4 +1,4 @@
-import { COUNTRY_GROUPS, DEFAULT_COUNTRIES, DEFAULT_GENRES, GENRE_NAMES } from '../config.js';
+import { config, COUNTRY_GROUPS, DEFAULT_COUNTRIES, DEFAULT_GENRES, GENRE_NAMES } from '../config.js';
 import type { CurrentRun, RunRow } from '../jobs/runner.js';
 import { CHART_LABELS, CHART_LIMITS, CHARTS, estimate, type ParseSettings } from '../settings.js';
 import { ago, esc, fmt, page } from './ui.js';
@@ -51,12 +51,20 @@ function linkedinSummary(r: RunRow): string {
     if (parts.length || tr.spentUsd) out += ` · Treg: ${parts.join(', ') || 'без новых данных'}, $${tr.spentUsd.toFixed(2)}`;
     if (tr.error) out += ` · <span class="warn">Treg: ${esc(tr.error)}</span>`;
   }
-  return out;
+  return out + asaSummary(r);
+}
+
+function asaSummary(r: RunRow): string {
+  const a = r.result?.asaEu;
+  if (!a || (!a.checked && !a.failed)) return '';
+  const failed = a.failed ? `, не ответил реестр: ${fmt(a.failed)}` : '';
+  return ` · Apple Ads в ЕС: проверено ${fmt(a.checked)}, крутят сейчас ${fmt(a.active)}, раньше ${fmt(a.past)}${failed}${a.error ? ` · <span class="warn">${esc(a.error)}</span>` : ''}`;
 }
 
 function runSummary(r: RunRow): string {
   if (r.error) return `<span class="bad">${esc(r.error)}</span>`;
   if (!r.result) return '';
+  if (r.params?.kind === 'asa') return asaSummary(r).replace(/^ · /, '') || 'приложений, которым пора, не было';
   if (r.params?.kind === 'contacts') {
     const personal = r.result.personalFound !== undefined ? `, личная у ${fmt(r.result.personalFound)}` : '';
     const sites = r.result.siteDescriptions ? `, описание с сайта у ${fmt(r.result.siteDescriptions)}` : '';
@@ -71,6 +79,7 @@ function scope(r: RunRow): string {
   const p = r.params;
   if (!p) return '';
   if (p.kind === 'contacts') return 'контакты компаний';
+  if (p.kind === 'asa') return 'Apple Ads в ЕС';
   return `${p.countries?.length ?? 0} стран × ${p.genres?.length ?? 0} кат. × ${p.charts?.length ?? 0} чарт.`;
 }
 
@@ -137,6 +146,10 @@ export function renderSettingsPage(o: {
     <form method="post" action="/runs/contacts" class="bar">
       <button type="submit"${running ? ' disabled title="Сбор уже идёт"' : ''}>Дособрать контакты компаний</button>
       <span class="mut small">Без модели: для компаний с целевыми приложениями и приложениями «под вопросом» — блок продавца в App Store ЕС (D-U-N-S, адрес, почта), Google Play (почта аккаунта, все приложения), сайт (контакты, команда, импрессум), затем LinkedIn, Hunter и Treg. Работает и при исчерпанном лимите Anthropic.</span>
+    </form>
+    <form method="post" action="/runs/asa-eu" class="bar">
+      <button type="submit"${running ? ' disabled title="Сбор уже идёт"' : ''}>Проверить Apple Ads в ЕС</button>
+      <span class="mut small">Бесплатно, без модели и платных API: приложения целевых компаний и «под вопросом» в реестре рекламы Apple (25 стран ЕС, 90 дней) — крутят ли сейчас, когда последний показ, в каких странах. Реестр пускает около одного запроса в 3 секунды, поэтому 600 приложений — примерно полчаса. Повторно — не чаще раза в ${config.asaEu.recheckDays} дн. на приложение; «Дособрать контакты» тоже проверяет до ${config.asaEu.maxPerRun} приложений за проход.</span>
     </form>
     <p class="small">${
       o.searchEnabled
