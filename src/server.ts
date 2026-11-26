@@ -12,6 +12,7 @@ import { getParseSettings, ParseSettingsSchema, saveParseSettings } from './sett
 import { renderSettingsPage, type Flash } from './web/settings-page.js';
 import { esc, fmt, page, safeHref } from './web/ui.js';
 import { linkedinSearchLinks } from './contacts/linkedin.js';
+import { AsaBudgetError, getAsaEu, isAppId } from './apple/ad-repository.js';
 
 const app = express();
 
@@ -48,6 +49,39 @@ app.post('/ingest', wrap(async (req, res) => {
   const r = await startRun('api');
   if (r.started) res.status(202).json({ ok: true, runId: r.id });
   else res.status(409).json({ ok: false, error: r.reason });
+}));
+
+// Реклама приложения в App Store в ЕС (реестр Apple) — для расширения ASA Leads.
+// Без пароля: данные публичные, лидов тут нет. Кэш на сутки в Postgres; чтобы чужие
+// запросы не выбрали лимит Apple для нашего IP, промахов кэша не больше 300 в час на весь сервер.
+const asaMisses: number[] = [];
+const ASA_MISSES_PER_HOUR = 300;
+
+app.get('/api/asa-eu/:appId', wrap(async (req, res) => {
+  const appId = String(req.params.appId);
+  if (!isAppId(appId)) {
+    // ответы читает англоязычное расширение, поэтому ошибки по-английски
+    res.status(400).json({ ok: false, error: 'appId must be the number from the App Store link (id123456789)' });
+    return;
+  }
+  const allowMiss = () => {
+    const hourAgo = Date.now() - 3_600_000;
+    while (asaMisses.length && asaMisses[0] < hourAgo) asaMisses.shift();
+    if (asaMisses.length >= ASA_MISSES_PER_HOUR) return false;
+    asaMisses.push(Date.now());
+    return true;
+  };
+  try {
+    const summary = await getAsaEu(appId, allowMiss);
+    res.set('Cache-Control', 'private, max-age=3600').json({ ok: true, ...summary });
+  } catch (e) {
+    if (e instanceof AsaBudgetError) {
+      res.status(429).json({ ok: false, error: 'Hourly limit for the Apple ad registry is used up, try later' });
+      return;
+    }
+    console.error(`asa-eu ${appId}:`, e);
+    res.status(502).json({ ok: false, error: 'Apple ad registry did not respond, try later' });
+  }
 }));
 
 // Всё остальное (лиды с контактами) — под паролем, если он задан

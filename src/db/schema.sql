@@ -170,3 +170,10 @@ ALTER TABLE companies ADD COLUMN IF NOT EXISTS best_email_status TEXT;         -
 -- v11: как компания описывает себя на главной сайта (meta description) — контекст для письма в списке «Люди»
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS site_description    TEXT;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS site_description_at TIMESTAMPTZ;  -- когда смотрели главную (описания могло не быть)
+
+-- v12: реклама приложения в App Store в ЕС по реестру Apple (Ad Repository) — кэш сводки на сутки
+CREATE TABLE IF NOT EXISTS asa_eu_cache (
+  app_id     BIGINT PRIMARY KEY,
+  summary    JSONB NOT NULL,                 -- AsaEuSummary из src/apple/ad-repository.ts
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

@@ -27,17 +27,19 @@ export interface GetOptions {
   baseDelayMs?: number;
   /** доп. статусы для повтора: iTunes RSS при превышении частоты отвечает 403, а не 429 */
   retryAlso?: number[];
+  /** доп. заголовки поверх дефолтных (Ad Repository без Accept: application/json отвечает 503) */
+  headers?: Record<string, string>;
 }
 
 export async function getJson<T>(
   url: string,
-  { attempts = 4, timeoutMs = 20_000, baseDelayMs = 500, retryAlso = [] }: GetOptions = {},
+  { attempts = 4, timeoutMs = 20_000, baseDelayMs = 500, retryAlso = [], headers = {} }: GetOptions = {},
 ): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const res = await fetch(url, {
-        headers: { 'User-Agent': 'app-store-leads/0.1', 'Accept-Language': 'en-US' },
+        headers: { 'User-Agent': 'app-store-leads/0.1', 'Accept-Language': 'en-US', ...headers },
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (res.ok) return (await res.json()) as T;

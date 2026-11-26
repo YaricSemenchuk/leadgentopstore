@@ -296,6 +296,31 @@ Railway cron с `curl -X POST -H "Authorization: Bearer $INGEST_TOKEN" …/inges
 | `DASHBOARD_PASSWORD` | пароль на дашборд и CSV (Basic auth, логин любой) |
 | `INGEST_TOKEN` | токен для `POST /ingest` |
 
+## Apple Ads в ЕС: `GET /api/asa-eu/:appId`
+
+Крутит ли приложение Apple Ads в ЕС — по публичному реестру Apple
+([Ad Repository API](https://developer.apple.com/support/downloads/Ad-Repository.pdf)).
+Им пользуется расширение ASA Leads: бейдж на странице приложения в App Store. Без пароля —
+данные публичные, лидов в ответе нет.
+
+```
+GET /api/asa-eu/1434192937
+→ { ok, status: "active" | "past" | "none", lastImpression, firstImpression, dataStart, dataEnd,
+    adsTotal, adsScanned, countries: [{key: "NL", ads, last}], placements: [{key: "APPSTORE_SEARCH_RESULTS", ads, last}],
+    developerName, legalName, checkedAt, cached, stale? }
+```
+
+- Окно — 90 дней, все 25 стран ЕС одним запросом. США, Великобритании и остальных в реестре нет;
+  ключей и ставок тоже нет — только факт показа, страна, плейсмент и даты.
+- Данные Apple отстают на ~5–7 дней (`dataEnd`). `active` — последний показ не раньше недели до `dataEnd`,
+  `past` — раньше, `none` — объявлений в окне нет.
+- Кэш — таблица `asa_eu_cache`, сутки. Если реестр не отвечает, отдаётся устаревшая копия с `stale: true`.
+- Реестр пускает ~4 запроса подряд, дальше примерно один в 3 секунды с IP. Сервер держит под это
+  общее «ведро» и не больше 300 промахов кэша в час; сверх — 429.
+- Разбивка по странам и плейсментам — по 200 последним объявлениям (`adsScanned` < `adsTotal` у гигантов).
+- Где API расходится с PDF Apple (страница вместо offset, лимит 5 стран в фильтре и т. п.) — в шапке
+  `src/apple/ad-repository.ts`.
+
 ## Персональные данные
 
 Почта разработчика — публичный контакт, который он сам указал для своего приложения,
